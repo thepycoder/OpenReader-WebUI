@@ -3,7 +3,9 @@ import stringSimilarity from 'string-similarity';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import "core-js/proposals/promise-with-resolvers";
-import { processTextToSentences } from '@/utils/nlp';
+import { processTextToSentences, type PreprocessingContext } from '@/utils/nlp';
+import type { TextItemWithSize } from '@/utils/tts-preprocessing';
+import { applyBlockLevelRules, applyPageLevelRules } from '@/utils/tts-preprocessing';
 
 // Function to detect if we need to use legacy build
 function shouldUseLegacyBuild() {
@@ -57,12 +59,45 @@ interface TextMatch {
   lengthDiff: number;
 }
 
+/**
+ * Preprocesses a line of text based on its constituent text items
+ * This is where block-level TTS preprocessing happens at the granular level
+ * 
+ * @param lineText - The assembled line text
+ * @param lineItems - The text items that make up this line
+ * @param allPageTextItems - All text items from the entire page for context-aware processing
+ * @param lineIndex - Index of this line in the page (for comparing with adjacent lines)
+ * @returns Preprocessed line text
+ */
+function preprocessLineForTTS(
+  lineText: string, 
+  lineItems: TextItemWithSize[],
+  allPageTextItems: TextItemWithSize[],
+  lineIndex: number
+): string {
+  if (!lineText.trim()) return lineText;
+
+  // Create preprocessing context with page-wide information
+  const context: PreprocessingContext = {
+    documentType: 'pdf',
+    textItems: allPageTextItems, // All page items for context-aware processing
+    originalText: lineText,
+    currentLineItems: lineItems, // Current line items for specific analysis
+    currentLineIndex: lineIndex // Line position for comparison with adjacent lines
+  };
+
+  // Apply block-level preprocessing rules to this specific line
+  const preprocessedLine = applyBlockLevelRules(lineText, context);
+  
+  return preprocessedLine;
+}
+
 // Text Processing functions
 export async function extractTextFromPDF(
   pdf: PDFDocumentProxy, 
   pageNumber: number, 
   margins = { header: 0.07, footer: 0.07, left: 0.07, right: 0.07 }
-): Promise<string> {
+): Promise<{ text: string; textItems: TextItemWithSize[] }> {
   try {
     // Log pdf worker version
     //console.log('PDF worker version:', pdfjs.GlobalWorkerOptions.workerSrc);
@@ -106,14 +141,21 @@ export async function extractTextFromPDF(
       return item.str.trim().length > 0;
     });
 
+    // Create enhanced text items with font size information
+    const enhancedTextItems: TextItemWithSize[] = textItems.map(item => ({
+      ...item,
+      fontSize: Math.abs(item.transform[3]), // scaleY represents font size
+      isBold: Math.abs(item.transform[0]) > Math.abs(item.transform[3]) // scaleX > scaleY might indicate bold
+    }));
+
     //console.log('Filtered text items:', textItems);
 
     const tolerance = 2;
-    const lines: TextItem[][] = [];
-    let currentLine: TextItem[] = [];
+    const lines: TextItemWithSize[][] = [];
+    let currentLine: TextItemWithSize[] = [];
     let currentY: number | null = null;
 
-    textItems.forEach((item) => {
+    enhancedTextItems.forEach((item) => {
       const y = item.transform[5];
       if (currentY === null) {
         currentY = y;
@@ -132,7 +174,7 @@ export async function extractTextFromPDF(
     for (const line of lines) {
       line.sort((a, b) => a.transform[4] - b.transform[4]);
       let lineText = '';
-      let prevItem: TextItem | null = null;
+      let prevItem: TextItemWithSize | null = null;
 
       for (const item of line) {
         if (!prevItem) {
@@ -162,13 +204,27 @@ export async function extractTextFromPDF(
         }
         prevItem = item;
       }
-      pageText += lineText + ' ';
+      
+      // Apply TTS preprocessing to this line before adding to page text
+      const preprocessedLine = preprocessLineForTTS(lineText, line, enhancedTextItems, lines.indexOf(line));
+      pageText += preprocessedLine + ' ';
     }
-
-    return pageText.replace(/\s+/g, ' ').trim();
+  
+    // Apply page-level preprocessing rules to the final assembled text
+    const preprocessingContext: PreprocessingContext = {
+      documentType: 'pdf',
+      textItems: enhancedTextItems,
+      originalText: pageText
+    };
+    
+    const pageProcessedText = applyPageLevelRules(pageText.replace(/\s+/g, ' ').trim(), preprocessingContext);
+    const finalText = pageProcessedText;
+    
+    return { text: finalText, textItems: enhancedTextItems };
+    
   } catch (error) {
     console.error('Error extracting text from PDF:', error);
-    throw new Error('Failed to extract text from PDF');
+    throw error;
   }
 }
 
@@ -285,6 +341,76 @@ export function highlightPattern(
   }
 }
 
+/**
+ * Finds the most specific sentence that contains the clicked text
+ * Uses word boundaries and position weighting for better precision
+ * 
+ * @param {string} clickedText - The text that was clicked
+ * @param {string[]} sentences - Array of processed sentences
+ * @param {number} contextMatchIndex - Index of the sentence that matched the context
+ * @returns {Object} Object containing the best sentence match and its index
+ */
+function findClickedSentence(
+  clickedText: string,
+  sentences: string[],
+  contextMatchIndex: number
+): { sentence: string; index: number; confidence: number } {
+  let bestMatch = { sentence: sentences[contextMatchIndex], index: contextMatchIndex, confidence: 0 };
+  
+  // Define search range around the context match (±2 sentences)
+  const searchStart = Math.max(0, contextMatchIndex - 2);
+  const searchEnd = Math.min(sentences.length - 1, contextMatchIndex + 2);
+  
+  for (let i = searchStart; i <= searchEnd; i++) {
+    const sentence = sentences[i];
+    const clickedLower = clickedText.toLowerCase().trim();
+    const sentenceLower = sentence.toLowerCase();
+    
+    let confidence = 0;
+    
+    // Check for exact word match (highest priority)
+    const clickedWords = clickedLower.split(/\s+/);
+    const sentenceWords = sentenceLower.split(/\s+/);
+    
+    let exactWordMatches = 0;
+    for (const clickedWord of clickedWords) {
+      if (clickedWord.length > 2) { // Skip very short words
+        for (const sentenceWord of sentenceWords) {
+          if (sentenceWord.includes(clickedWord) || clickedWord.includes(sentenceWord)) {
+            exactWordMatches++;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (exactWordMatches > 0) {
+      confidence += (exactWordMatches / clickedWords.length) * 0.4;
+    }
+    
+    // Check for substring containment
+    if (sentenceLower.includes(clickedLower)) {
+      confidence += 0.3;
+    } else if (clickedLower.includes(sentenceLower.trim())) {
+      confidence += 0.2;
+    }
+    
+    // String similarity
+    const similarity = stringSimilarity.compareTwoStrings(clickedText, sentence);
+    confidence += similarity * 0.3;
+    
+    // Position bonus (prefer sentences closer to context match)
+    const positionBonus = 1 - (Math.abs(i - contextMatchIndex) * 0.1);
+    confidence *= positionBonus;
+    
+    if (confidence > bestMatch.confidence) {
+      bestMatch = { sentence, index: i, confidence };
+    }
+  }
+  
+  return bestMatch;
+}
+
 // Text Click Handler
 export function handleTextClick(
   event: MouseEvent,
@@ -304,6 +430,12 @@ export function handleTextClick(
   const spans = Array.from(parentElement.querySelectorAll('span'));
   const clickedIndex = spans.indexOf(target);
   const contextWindow = 3;
+  
+  // Get the clicked text for precise matching
+  const clickedText = (target.textContent || '').trim();
+  if (!clickedText) return;
+  
+  // Get context window for robust matching
   const startIndex = Math.max(0, clickedIndex - contextWindow);
   const endIndex = Math.min(spans.length - 1, clickedIndex + contextWindow);
   const contextText = spans
@@ -320,6 +452,7 @@ export function handleTextClick(
     text: (node.textContent || '').trim(),
   })).filter((node) => node.text.length > 0);
 
+  // Use context for robust matching
   const bestMatch = findBestTextMatch(allText, cleanContext, cleanContext.length * 2);
   const similarityThreshold = bestMatch.lengthDiff < cleanContext.length * 0.3 ? 0.3 : 0.5;
 
@@ -327,22 +460,40 @@ export function handleTextClick(
     const matchText = bestMatch.text;
     // Use the same sentence processing logic as TTSContext for consistency
     const sentences = processTextToSentences(pdfText);
-    console.log("sentences inside handleTextClick: %d", sentences.length)
-    let bestSentenceMatch = { sentence: '', rating: 0 };
+    console.log("sentences inside handleTextClick: %d", sentences.length);
+    
+    // Find the best sentence match using the context
+    let bestSentenceMatch = { sentence: '', rating: 0, index: -1 };
 
-    for (const sentence of sentences) {
+    for (let i = 0; i < sentences.length; i++) {
+      const sentence = sentences[i];
       const rating = stringSimilarity.compareTwoStrings(matchText, sentence);
       if (rating > bestSentenceMatch.rating) {
-        bestSentenceMatch = { sentence, rating };
+        bestSentenceMatch = { sentence, rating, index: i };
       }
     }
 
     if (bestSentenceMatch.rating >= 0.5) {
-      const sentenceIndex = sentences.findIndex((sentence) => sentence === bestSentenceMatch.sentence);
-      if (sentenceIndex !== -1) {
-        stopAndPlayFromIndex(sentenceIndex);
-        highlightPattern(pdfText, bestSentenceMatch.sentence, containerRef);
-      }
+      // Use the new helper function to find the most specific sentence
+      const clickedSentenceMatch = findClickedSentence(
+        clickedText,
+        sentences,
+        bestSentenceMatch.index
+      );
+      
+      console.log(`Context matched sentence ${bestSentenceMatch.index}, clicked text matched sentence ${clickedSentenceMatch.index} with confidence ${clickedSentenceMatch.confidence}`);
+      
+      // Use the clicked sentence match if it has reasonable confidence
+      const targetSentenceIndex = clickedSentenceMatch.confidence > 0.2 
+        ? clickedSentenceMatch.index 
+        : bestSentenceMatch.index;
+      const targetSentence = sentences[targetSentenceIndex];
+      
+      // Play the specific sentence that was clicked
+      stopAndPlayFromIndex(targetSentenceIndex);
+      
+      // Highlight only the target sentence, not the entire context
+      highlightPattern(pdfText, targetSentence, containerRef);
     }
   }
 }

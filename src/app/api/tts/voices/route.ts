@@ -21,6 +21,11 @@ export async function GET(req: NextRequest) {
     }
 
     const data = await response.json();
+
+    if (!data.voices) {
+      throw new Error('No voices found');
+    }
+
     return NextResponse.json({ voices: data.voices || DEFAULT_VOICES });
   } catch (error) {
     console.error('Error fetching voices:', error);

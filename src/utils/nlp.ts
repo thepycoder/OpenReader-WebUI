@@ -6,6 +6,10 @@
  */
 
 import nlp from 'compromise';
+import { applyPreprocessingRules, type PreprocessingContext } from '@/utils/tts-preprocessing';
+
+// Re-export the PreprocessingContext type for use in other modules
+export type { PreprocessingContext } from '@/utils/tts-preprocessing';
 
 const MAX_BLOCK_LENGTH = 300;
 
@@ -29,9 +33,10 @@ export const preprocessSentenceForAudio = (text: string): string => {
  * Splits text into sentences and groups them into blocks suitable for TTS processing
  * 
  * @param {string} text - The text to split into sentences
- * @returns {string[]} Array of sentence blocks
+ * @param {PreprocessingContext} context - Context for TTS preprocessing rules
+ * @returns {string[]} Array of sentence blocks with TTS preprocessing applied
  */
-export const splitIntoSentences = (text: string): string[] => {
+export const splitIntoSentences = (text: string, context: PreprocessingContext = {}): string[] => {
   const paragraphs = text.split(/\n+/);
   const blocks: string[] = [];
 
@@ -48,7 +53,11 @@ export const splitIntoSentences = (text: string): string[] => {
       const trimmedSentence = sentence.trim();
       
       if (currentBlock && (currentBlock.length + trimmedSentence.length + 1) > MAX_BLOCK_LENGTH) {
-        blocks.push(currentBlock.trim());
+        // Apply TTS preprocessing only if not already done (e.g., for non-PDF documents)
+        const finalBlock = context.documentType === 'pdf' 
+          ? currentBlock.trim() 
+          : applyPreprocessingRules(currentBlock.trim(), context);
+        blocks.push(finalBlock);
         currentBlock = trimmedSentence;
       } else {
         currentBlock = currentBlock 
@@ -58,7 +67,11 @@ export const splitIntoSentences = (text: string): string[] => {
     }
 
     if (currentBlock) {
-      blocks.push(currentBlock.trim());
+      // Apply TTS preprocessing only if not already done (e.g., for non-PDF documents)
+      const finalBlock = context.documentType === 'pdf' 
+        ? currentBlock.trim() 
+        : applyPreprocessingRules(currentBlock.trim(), context);
+      blocks.push(finalBlock);
     }
   }
   
@@ -67,11 +80,13 @@ export const splitIntoSentences = (text: string): string[] => {
 
 /**
  * Main sentence processing function that handles both short and long texts
+ * Now includes TTS preprocessing rules (except for PDFs where it's already applied)
  * 
  * @param {string} text - The text to process
- * @returns {string[]} Array of processed sentences/blocks
+ * @param {PreprocessingContext} context - Context for TTS preprocessing rules
+ * @returns {string[]} Array of processed sentences/blocks with TTS preprocessing applied
  */
-export const processTextToSentences = (text: string): string[] => {
+export const processTextToSentences = (text: string, context: PreprocessingContext = {}): string[] => {
   if (!text || text.length < 1) {
     return [];
   }
@@ -79,11 +94,15 @@ export const processTextToSentences = (text: string): string[] => {
   if (text.length <= MAX_BLOCK_LENGTH) {
     // Single sentence preprocessing
     const cleanedText = preprocessSentenceForAudio(text);
-    return [cleanedText];
+    // Apply TTS preprocessing rules only if not already done (e.g., for non-PDF documents)
+    const finalText = context.documentType === 'pdf' 
+      ? cleanedText 
+      : applyPreprocessingRules(cleanedText, context);
+    return [finalText];
   }
 
-  // Full text splitting into sentences
-  return splitIntoSentences(text);
+  // Full text splitting into sentences with TTS preprocessing
+  return splitIntoSentences(text, context);
 };
 
 /**

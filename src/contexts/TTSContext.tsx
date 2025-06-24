@@ -64,6 +64,11 @@ interface TTSContextType {
   // Voice settings
   availableVoices: string[];
 
+  // Debug information
+  allSentences: string[];
+  currentSentenceIndex: number;
+  originalPageText: string;
+
   // Control functions
   togglePlay: () => void;
   skipForward: () => void;
@@ -147,6 +152,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   const [voice, setVoice] = useState(configVoice);
   const [ttsModel, setTTSModel] = useState(configTTSModel);
   const [ttsInstructions, setTTSInstructions] = useState(configTTSInstructions);
+  const [originalPageText, setOriginalPageText] = useState<string>('');
 
   // Track pending preload requests
   const preloadRequests = useRef<Map<string, Promise<string>>>(new Map());
@@ -166,9 +172,15 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
       return [];
     }
 
-    // Use the shared utility directly instead of making an API call
-    return processTextToSentences(text);
-  }, []);
+    // Create preprocessing context with document type information
+    const context = {
+      documentType: (isEPUB ? 'epub' : 'pdf') as 'epub' | 'pdf',
+      originalText: text,
+    };
+
+    // Use the shared utility with TTS preprocessing context
+    return processTextToSentences(text, context);
+  }, [isEPUB]);
 
   /**
    * Stops the current audio playback and clears the active Howl instance
@@ -296,6 +308,9 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   const setText = useCallback((text: string, shouldPause = false) => {
     // Check for blank section first
     if (handleBlankSection(text)) return;
+
+    // Store the original text for debugging
+    setOriginalPageText(text);
 
     // Keep track of previous state and pause playback
     const wasPlaying = isPlaying;
@@ -753,6 +768,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     setCurrDocPages(undefined);
     setIsProcessing(false);
     setIsEPUB(false);
+    setOriginalPageText('');
   }, [abortAudio]);
 
   /**
@@ -881,7 +897,10 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     setVoiceAndRestart,
     skipToLocation,
     registerLocationChangeHandler,
-    setIsEPUB
+    setIsEPUB,
+    allSentences: sentences,
+    currentSentenceIndex: currentIndex,
+    originalPageText: originalPageText
   }), [
     isPlaying,
     isProcessing,
@@ -905,7 +924,8 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     setVoiceAndRestart,
     skipToLocation,
     registerLocationChangeHandler,
-    setIsEPUB
+    setIsEPUB,
+    originalPageText
   ]);
 
   // Use media session hook

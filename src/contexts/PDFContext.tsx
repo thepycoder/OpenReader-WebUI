@@ -29,9 +29,9 @@ import { useTTS } from '@/contexts/TTSContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import {
   extractTextFromPDF,
-  highlightPattern,
-  clearHighlights,
-  handleTextClick,
+  highlightPattern as highlightPatternFromPDF,
+  clearHighlights as clearHighlightsFromPDF,
+  handleTextClick as handleTextClickFromPDF
 } from '@/utils/pdf';
 
 import type { PDFDocumentProxy } from 'pdfjs-dist';
@@ -125,7 +125,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
   const loadCurrDocText = useCallback(async () => {
     try {
       if (!pdfDocument) return;
-      const text = await extractTextFromPDF(pdfDocument, currDocPage, {
+      const { text } = await extractTextFromPDF(pdfDocument, currDocPage, {
         header: headerMargin,
         footer: footerMargin,
         left: leftMargin,
@@ -206,7 +206,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       let totalLength = 0;
       
       for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
-        const text = await extractTextFromPDF(pdfDocument, pageNum, {
+        const { text } = await extractTextFromPDF(pdfDocument, pageNum, {
           header: headerMargin,
           footer: footerMargin,
           left: leftMargin,
@@ -327,9 +327,9 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       currDocPage,
       currDocText,
       clearCurrDoc,
-      highlightPattern,
-      clearHighlights,
-      handleTextClick,
+      highlightPattern: highlightPatternFromPDF,
+      clearHighlights: clearHighlightsFromPDF,
+      handleTextClick: handleTextClickFromPDF,
       pdfDocument,
       createFullAudioBook,
       isAudioCombining,

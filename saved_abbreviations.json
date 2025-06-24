@@ -1,0 +1,51 @@
+{
+  "version": "1.0",
+  "exportedAt": "2025-06-23T20:10:57.152Z",
+  "abbreviations": [
+    {
+      "abbreviation": "(\\d*) (000)",
+      "expansion": "$1$2",
+      "enabled": true
+    },
+    {
+      "abbreviation": "(\\d*).(\\d*)",
+      "expansion": "$1 point $2",
+      "enabled": true
+    },
+    {
+      "abbreviation": " km 2 ",
+      "expansion": "square kilometers",
+      "enabled": true
+    },
+    {
+      "abbreviation": " m 2 ",
+      "expansion": "square meters",
+      "enabled": true
+    },
+    {
+      "abbreviation": "MW",
+      "expansion": "megawatts",
+      "enabled": true
+    },
+    {
+      "abbreviation": "GW",
+      "expansion": "gigawatts",
+      "enabled": true
+    },
+    {
+      "abbreviation": "/d",
+      "expansion": " per day",
+      "enabled": true
+    },
+    {
+      "abbreviation": "/p",
+      "expansion": " per person",
+      "enabled": true
+    },
+    {
+      "abbreviation": "kWh",
+      "expansion": "kilowatt-hours",
+      "enabled": true
+    }
+  ]
+}
