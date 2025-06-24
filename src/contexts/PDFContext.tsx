@@ -316,6 +316,39 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     setIsEPUB(false);
   }, [setIsEPUB]);
 
+  // Create wrapped functions that include margins
+  const highlightPatternWithMargins = useCallback(
+    (text: string, pattern: string, containerRef: RefObject<HTMLDivElement>) => {
+      const margins = {
+        header: headerMargin,
+        footer: footerMargin,
+        left: leftMargin,
+        right: rightMargin
+      };
+      return highlightPatternFromPDF(text, pattern, containerRef, margins);
+    },
+    [headerMargin, footerMargin, leftMargin, rightMargin]
+  );
+
+  const handleTextClickWithMargins = useCallback(
+    (
+      event: MouseEvent,
+      pdfText: string,
+      containerRef: RefObject<HTMLDivElement>,
+      stopAndPlayFromIndex: (index: number) => void,
+      isProcessing: boolean
+    ) => {
+      const margins = {
+        header: headerMargin,
+        footer: footerMargin,
+        left: leftMargin,
+        right: rightMargin
+      };
+      return handleTextClickFromPDF(event, pdfText, containerRef, stopAndPlayFromIndex, isProcessing, margins);
+    },
+    [headerMargin, footerMargin, leftMargin, rightMargin]
+  );
+
   // Context value memoization
   const contextValue = useMemo(
     () => ({
@@ -327,9 +360,9 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       currDocPage,
       currDocText,
       clearCurrDoc,
-      highlightPattern: highlightPatternFromPDF,
+      highlightPattern: highlightPatternWithMargins,
       clearHighlights: clearHighlightsFromPDF,
-      handleTextClick: handleTextClickFromPDF,
+      handleTextClick: handleTextClickWithMargins,
       pdfDocument,
       createFullAudioBook,
       isAudioCombining,
@@ -343,6 +376,8 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       currDocPage,
       currDocText,
       clearCurrDoc,
+      highlightPatternWithMargins,
+      handleTextClickWithMargins,
       pdfDocument,
       createFullAudioBook,
       isAudioCombining,

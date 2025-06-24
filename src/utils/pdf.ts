@@ -285,7 +285,8 @@ export function findBestTextMatch(
 export function highlightPattern(
   text: string,
   pattern: string,
-  containerRef: React.RefObject<HTMLDivElement>
+  containerRef: React.RefObject<HTMLDivElement>,
+  margins = { header: 0.07, footer: 0.07, left: 0.07, right: 0.07 }
 ) {
   clearHighlights();
 
@@ -295,13 +296,54 @@ export function highlightPattern(
   const container = containerRef.current;
   if (!container) return;
 
-  const textNodes = container.querySelectorAll('.react-pdf__Page__textContent span');
-  const allText = Array.from(textNodes).map((node) => ({
-    element: node as HTMLElement,
-    text: (node.textContent || '').trim(),
-  })).filter((node) => node.text.length > 0);
+  // Find the page element to get page dimensions
+  const pageElement = container.querySelector('.react-pdf__Page__canvas') as HTMLCanvasElement;
+  if (!pageElement) return;
 
+  const pageRect = pageElement.getBoundingClientRect();
   const containerRect = container.getBoundingClientRect();
+  
+  // Calculate margin boundaries in DOM coordinates (y=0 at top)
+  const pageWidth = pageRect.width;
+  const pageHeight = pageRect.height;
+  const headerMargin = pageHeight * margins.header; // From top
+  const footerMargin = pageHeight * margins.footer; // From bottom
+  const leftMargin = pageWidth * margins.left;
+  const rightMargin = pageWidth * margins.right;
+
+  const textNodes = container.querySelectorAll('.react-pdf__Page__textContent span');
+  const allText = Array.from(textNodes).map((node) => {
+    const element = node as HTMLElement;
+    const text = (element.textContent || '').trim();
+    return { element, text };
+  }).filter((node) => {
+    if (node.text.length === 0) return false;
+    
+    // Get element position relative to the page
+    const elementRect = node.element.getBoundingClientRect();
+    const relativeToPage = {
+      top: elementRect.top - pageRect.top,
+      left: elementRect.left - pageRect.left,
+      bottom: elementRect.bottom - pageRect.top,
+      right: elementRect.right - pageRect.left
+    };
+    
+    // Check if element is within margin boundaries
+    // Top margin check (header)
+    if (relativeToPage.top < headerMargin) return false;
+    
+    // Bottom margin check (footer) 
+    if (relativeToPage.bottom > (pageHeight - footerMargin)) return false;
+    
+    // Left margin check
+    if (relativeToPage.left < leftMargin) return false;
+    
+    // Right margin check  
+    if (relativeToPage.right > (pageWidth - rightMargin)) return false;
+    
+    return true;
+  });
+
   const visibleTop = container.scrollTop;
   const visibleBottom = visibleTop + containerRect.height;
   const bufferSize = containerRect.height;
@@ -417,7 +459,8 @@ export function handleTextClick(
   pdfText: string,
   containerRef: React.RefObject<HTMLDivElement>,
   stopAndPlayFromIndex: (index: number) => void,
-  isProcessing: boolean
+  isProcessing: boolean,
+  margins = { header: 0.07, footer: 0.07, left: 0.07, right: 0.07 }
 ) {
   if (isProcessing) return;
 
@@ -493,7 +536,7 @@ export function handleTextClick(
       stopAndPlayFromIndex(targetSentenceIndex);
       
       // Highlight only the target sentence, not the entire context
-      highlightPattern(pdfText, targetSentence, containerRef);
+      highlightPattern(pdfText, targetSentence, containerRef, margins);
     }
   }
 }

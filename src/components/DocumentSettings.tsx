@@ -248,7 +248,7 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                                   <input
                                     type="range"
                                     min="0"
-                                    max="0.2"
+                                    max="0.5"
                                     step="0.01"
                                     value={localMargins.header}
                                     onChange={handleMarginChange('header')}
@@ -268,7 +268,7 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                                   <input
                                     type="range"
                                     min="0"
-                                    max="0.2"
+                                    max="0.5"
                                     step="0.01"
                                     value={localMargins.footer}
                                     onChange={handleMarginChange('footer')}
@@ -288,7 +288,7 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                                   <input
                                     type="range"
                                     min="0"
-                                    max="0.2"
+                                    max="0.5"
                                     step="0.01"
                                     value={localMargins.left}
                                     onChange={handleMarginChange('left')}
@@ -308,7 +308,7 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                                   <input
                                     type="range"
                                     min="0"
-                                    max="0.2"
+                                    max="0.5"
                                     step="0.01"
                                     value={localMargins.right}
                                     onChange={handleMarginChange('right')}
