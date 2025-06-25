@@ -39,6 +39,7 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
   const {
     viewType,
     skipBlank,
+    preloadNextPage,
     epubTheme,
     headerMargin,
     footerMargin,
@@ -391,6 +392,22 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                               Automatically skip pages with no text content
                             </p>
                           </div>}
+
+                          {!html && !epub && <div className="space-y-1">
+                            <label className="flex items-center space-x-2">
+                              <input
+                                type="checkbox"
+                                checked={preloadNextPage}
+                                onChange={(e) => updateConfigKey('preloadNextPage', e.target.checked)}
+                                className="form-checkbox h-4 w-4 text-accent rounded border-muted"
+                              />
+                              <span className="text-sm font-medium text-foreground">Preload next page</span>
+                            </label>
+                            <p className="text-sm text-muted pl-6">
+                              Preload audio for the first sentences of the next page to reduce transition delays
+                            </p>
+                          </div>}
+
                           {epub && (
                             <div className="space-y-1">
                               <label className="flex items-center space-x-2">

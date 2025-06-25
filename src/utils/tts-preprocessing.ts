@@ -133,7 +133,7 @@ const addListPausesRule: PreprocessingRule = {
  * These rules need position/font information and are applied at the line level
  */
 const BLOCK_LEVEL_RULES: PreprocessingRule[] = [
-  addPeriodToTitlesRule,
+  // addPeriodToTitlesRule,
   addListPausesRule,
 ];
 

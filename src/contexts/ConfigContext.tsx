@@ -15,6 +15,7 @@ type ConfigValues = {
   audioPlayerSpeed: number;
   voice: string;
   skipBlank: boolean;
+  preloadNextPage: boolean;
   epubTheme: boolean;
   headerMargin: number;
   footerMargin: number;
@@ -33,6 +34,7 @@ interface ConfigContextType {
   audioPlayerSpeed: number;
   voice: string;
   skipBlank: boolean;
+  preloadNextPage: boolean;
   epubTheme: boolean;
   headerMargin: number;
   footerMargin: number;
@@ -63,6 +65,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [audioPlayerSpeed, setAudioPlayerSpeed] = useState<number>(1);
   const [voice, setVoice] = useState<string>('af_sarah');
   const [skipBlank, setSkipBlank] = useState<boolean>(true);
+  const [preloadNextPage, setPreloadNextPage] = useState<boolean>(true);
   const [epubTheme, setEpubTheme] = useState<boolean>(false);
   const [headerMargin, setHeaderMargin] = useState<number>(0.07);
   const [footerMargin, setFooterMargin] = useState<number>(0.07);
@@ -89,6 +92,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         const cachedAudioPlayerSpeed = await getItem('audioPlayerSpeed');
         const cachedVoice = await getItem('voice');
         const cachedSkipBlank = await getItem('skipBlank');
+        const cachedPreloadNextPage = await getItem('preloadNextPage');
         const cachedEpubTheme = await getItem('epubTheme');
         const cachedHeaderMargin = await getItem('headerMargin');
         const cachedFooterMargin = await getItem('footerMargin');
@@ -113,6 +117,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         setAudioPlayerSpeed(parseFloat(cachedAudioPlayerSpeed || '1'));
         setVoice(cachedVoice || 'af_sarah');
         setSkipBlank(cachedSkipBlank === 'false' ? false : true);
+        setPreloadNextPage(cachedPreloadNextPage === 'false' ? false : true);
         setEpubTheme(cachedEpubTheme === 'true');
         setHeaderMargin(parseFloat(cachedHeaderMargin || '0.07'));
         setFooterMargin(parseFloat(cachedFooterMargin || '0.07'));
@@ -127,6 +132,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         }
         if (cachedSkipBlank === null) {
           await setItem('skipBlank', 'true');
+        }
+        if (cachedPreloadNextPage === null) {
+          await setItem('preloadNextPage', 'true');
         }
         if (cachedEpubTheme === null) {
           await setItem('epubTheme', 'false');
@@ -225,6 +233,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         case 'skipBlank':
           setSkipBlank(value as boolean);
           break;
+        case 'preloadNextPage':
+          setPreloadNextPage(value as boolean);
+          break;
         case 'epubTheme':
           setEpubTheme(value as boolean);
           break;
@@ -264,6 +275,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       audioPlayerSpeed,
       voice,
       skipBlank,
+      preloadNextPage,
       epubTheme,
       headerMargin,
       footerMargin,

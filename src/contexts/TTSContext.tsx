@@ -83,7 +83,10 @@ interface TTSContextType {
   setVoiceAndRestart: (voice: string) => void;
   skipToLocation: (location: string | number, shouldPause?: boolean) => void;
   registerLocationChangeHandler: (handler: (location: string | number) => void) => void;  // EPUB-only: Handles chapter navigation
+  registerNextPagePreloadHandler: (handler: () => void) => void;  // PDF-only: Handles next-page preloading
   setIsEPUB: (isEPUB: boolean) => void;
+  // New function for next-page preloading
+  preloadNextPageText: (nextPageText: string) => void;
 }
 
 // Create the context
@@ -119,6 +122,8 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
 
   // Add ref for location change handler
   const locationChangeHandlerRef = useRef<((location: string | number) => void) | null>(null);
+  // Add ref for next-page preload handler
+  const nextPagePreloadHandlerRef = useRef<(() => void) | null>(null);
 
   /**
    * Registers a handler function for location changes in EPUB documents
@@ -128,6 +133,16 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
    */
   const registerLocationChangeHandler = useCallback((handler: (location: string | number) => void) => {
     locationChangeHandlerRef.current = handler;
+  }, []);
+
+  /**
+   * Registers a handler function for next-page preloading
+   * This is used for PDF documents to trigger preloading when on the last sentence
+   * 
+   * @param {Function} handler - Function to handle next-page preloading
+   */
+  const registerNextPagePreloadHandler = useCallback((handler: () => void) => {
+    nextPagePreloadHandlerRef.current = handler;
   }, []);
 
   // Get document ID from URL params
@@ -160,6 +175,10 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   const activeAbortControllers = useRef<Set<AbortController>>(new Set());
   // Track if we're restoring from a saved position
   const [pendingRestoreIndex, setPendingRestoreIndex] = useState<number | null>(null);
+  
+  // New state for next-page preloading
+  const nextPagePreloadControllerRef = useRef<AbortController | null>(null);
+  const preloadedSentencesCount = useRef<number>(0);
 
   /**
    * Processes text into sentences using the shared NLP utility
@@ -183,6 +202,17 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   }, [isEPUB]);
 
   /**
+   * Clears any ongoing next-page preloading
+   */
+  const clearNextPagePreload = useCallback(() => {
+    if (nextPagePreloadControllerRef.current) {
+      nextPagePreloadControllerRef.current.abort();
+      nextPagePreloadControllerRef.current = null;
+    }
+    preloadedSentencesCount.current = 0;
+  }, []);
+
+  /**
    * Stops the current audio playback and clears the active Howl instance
    * @param {boolean} [clearPending=false] - Whether to clear pending requests
    */
@@ -202,8 +232,10 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
       activeAbortControllers.current.clear();
       // Clear any pending preload requests
       preloadRequests.current.clear();
+      // Also clear next-page preload when clearing all pending requests
+      clearNextPagePreload();
     }
-  }, [activeHowl]);
+  }, [activeHowl, clearNextPagePreload]);
 
   /**
    * Pauses the current audio playback
@@ -221,7 +253,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
    * @param {string | number} location - The target location to navigate to
    * @param {boolean} keepPlaying - Whether to maintain playback state
    */
-  const skipToLocation = useCallback((location: string | number, shouldPause = false) => {
+  const skipToLocation = useCallback((location: string | number, shouldPause = false) => {    
     // Reset state for new content in correct order
     abortAudio();
     if (shouldPause) setIsPlaying(false);
@@ -315,7 +347,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     // Keep track of previous state and pause playback
     const wasPlaying = isPlaying;
     setIsPlaying(false);
-    abortAudio(true); // Clear pending requests since text is changing
+    abortAudio(); // Clear pending requests since text is changing
     setIsProcessing(true); // Set processing state before text processing starts
 
     console.log('Setting text:', text);
@@ -530,7 +562,15 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     const processPromise = (async () => {
       try {
         const audioBuffer = await getAudio(sentence);
-        if (!audioBuffer) throw new Error('No audio data generated');
+        if (!audioBuffer) {
+          // If this is a preload request and audio is undefined (likely aborted), 
+          // just return early without throwing an error
+          if (preload) {
+            console.log('Preload request aborted for sentence:', sentence.substring(0, 20));
+            throw new Error('PRELOAD_ABORTED'); // Special error type for preload aborts
+          }
+          throw new Error('No audio data generated');
+        }
         
         // Convert to base64 data URI
         const bytes = new Uint8Array(audioBuffer);
@@ -538,6 +578,10 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
         const base64String = btoa(binaryString);
         return `data:audio/mp3;base64,${base64String}`;
       } catch (error) {
+        // Handle preload abort errors silently
+        if (error instanceof Error && error.message === 'PRELOAD_ABORTED') {
+          throw error; // Re-throw but will be caught silently in preload contexts
+        }
         setIsProcessing(false);
         throw error;
       }
@@ -704,20 +748,33 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
 
   /**
    * Preloads the next sentence's audio
+   * Also triggers next-page preloading when on the last sentence of current page
    */
   const preloadNextAudio = useCallback(async () => {
     try {
       const nextSentence = sentences[currentIndex + 1];
+      
+      // Regular within-page preloading
       if (nextSentence && !audioCache.has(nextSentence) && !preloadRequests.current.has(nextSentence)) {
         // Start preloading but don't wait for it to complete
         processSentence(nextSentence, true).catch(error => {
           console.error('Error preloading next sentence:', error);
         });
       }
+      // Next-page preloading: trigger when we're on the last sentence of current page
+      else if (!nextSentence && !isEPUB && currDocPageNumber < (currDocPages || 0)) {
+        // We're on the last sentence of the current page and there's a next page
+        console.log(`Last sentence of page ${currDocPageNumber}, triggering next-page preload`);
+        
+        // Call the registered next-page preload handler if available
+        if (nextPagePreloadHandlerRef.current) {
+          nextPagePreloadHandlerRef.current();
+        }
+      }
     } catch (error) {
       console.error('Error initiating preload:', error);
     }
-  }, [currentIndex, sentences, audioCache, processSentence]);
+  }, [currentIndex, sentences, audioCache, processSentence, isEPUB, currDocPageNumber, currDocPages]);
 
   /**
    * Main Playback Driver
@@ -873,6 +930,72 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   }, [abortAudio, updateConfigKey, isPlaying]);
 
   /**
+   * Preloads the first few sentences of the next page
+   * This is called when we have the text of the next page to improve transition smoothness
+   * 
+   * @param {string} nextPageText - The text content of the next page
+   */
+  const preloadNextPageText = useCallback(async (nextPageText: string) => {
+    // Only preload for PDF documents (EPUB handles this differently)
+    if (isEPUB || !nextPageText || nextPageText.length === 0) return;
+    
+    // Abort any existing next-page preload
+    if (nextPagePreloadControllerRef.current) {
+      nextPagePreloadControllerRef.current.abort();
+    }
+    
+    // Create new abort controller for this preload operation
+    const controller = new AbortController();
+    nextPagePreloadControllerRef.current = controller;
+    
+    try {
+      console.log('Starting next-page preload...');
+      
+      // Process next page text into sentences
+      const context = {
+        documentType: 'pdf' as const,
+        originalText: nextPageText,
+      };
+      
+      const sentences = await processTextToSentences(nextPageText, context);
+      
+      // Check if operation was aborted
+      if (controller.signal.aborted) {
+        console.log('Next-page preload aborted');
+        return;
+      }
+      
+      if (sentences.length === 0) {
+        console.log('No sentences found in next page text');
+        return;
+      }
+      
+      // Preload only the first 2 sentences to be conservative (similar to regular preload approach)
+      const sentencesToPreload = Math.min(1, sentences.length);
+      preloadedSentencesCount.current = sentencesToPreload;
+      
+      console.log(`Preloading first ${sentencesToPreload} sentences of next page`);
+      
+      // Start preloading sentences in parallel but don't wait for them
+      for (let i = 0; i < sentencesToPreload; i++) {
+        const sentence = sentences[i];
+        if (sentence && !audioCache.has(sentence) && !preloadRequests.current.has(sentence)) {
+          processSentence(sentence, true).catch(error => {
+            console.error(`Error preloading next page sentence ${i}:`, error);
+          });
+        }
+      }
+      
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log('Next-page preload aborted');
+      } else {
+        console.error('Error processing next page text for preload:', error);
+      }
+    }
+  }, [isEPUB, audioCache, processSentence]);
+
+  /**
    * Provides the TTS context value to child components
    */
   const value = useMemo(() => ({
@@ -897,7 +1020,9 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     setVoiceAndRestart,
     skipToLocation,
     registerLocationChangeHandler,
+    registerNextPagePreloadHandler,
     setIsEPUB,
+    preloadNextPageText,
     allSentences: sentences,
     currentSentenceIndex: currentIndex,
     originalPageText: originalPageText
@@ -924,7 +1049,9 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     setVoiceAndRestart,
     skipToLocation,
     registerLocationChangeHandler,
+    registerNextPagePreloadHandler,
     setIsEPUB,
+    preloadNextPageText,
     originalPageText
   ]);
 

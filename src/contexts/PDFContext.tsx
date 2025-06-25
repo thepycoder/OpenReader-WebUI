@@ -85,13 +85,16 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     currDocPageNumber: currDocPage, 
     currDocPages, 
     setCurrDocPages,
-    setIsEPUB 
+    setIsEPUB,
+    preloadNextPageText,
+    registerNextPagePreloadHandler,
   } = useTTS();
   const { 
     headerMargin,
     footerMargin,
     leftMargin,
     rightMargin,
+    preloadNextPage,
     apiKey,
     baseUrl,
     voiceSpeed,
@@ -125,12 +128,15 @@ export function PDFProvider({ children }: { children: ReactNode }) {
   const loadCurrDocText = useCallback(async () => {
     try {
       if (!pdfDocument) return;
+      
+      // Extract current page text
       const { text } = await extractTextFromPDF(pdfDocument, currDocPage, {
         header: headerMargin,
         footer: footerMargin,
         left: leftMargin,
         right: rightMargin
       });
+      
       // Only update TTS text if the content has actually changed
       // This prevents unnecessary resets of the sentence index
       if (text !== currDocText || text === '') {
@@ -310,11 +316,42 @@ export function PDFProvider({ children }: { children: ReactNode }) {
   }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed]);
 
   /**
-   * Effect hook to initialize TTS as non-EPUB mode
+   * Handler for next-page preloading triggered when TTS reaches the last sentence
+   */
+  const handleNextPagePreload = useCallback(async () => {
+    if (!preloadNextPage || !pdfDocument) return;
+    
+    const nextPage = currDocPage + 1;
+    if (nextPage > (currDocPages || 0)) return;
+    
+    console.log(`TTS triggered next-page preload: extracting page ${nextPage}`);
+    
+    try {
+      const { text: nextPageText } = await extractTextFromPDF(pdfDocument, nextPage, {
+        header: headerMargin,
+        footer: footerMargin,
+        left: leftMargin,
+        right: rightMargin
+      });
+      
+      preloadNextPageText(nextPageText);
+    } catch (error) {
+      console.error('Error in next-page preload handler:', error);
+    }
+  }, [preloadNextPage, pdfDocument, currDocPage, currDocPages, preloadNextPageText, headerMargin, footerMargin, leftMargin, rightMargin]);
+
+  /**
+   * Effect hook to initialize TTS as non-EPUB mode and register next-page preload handler
    */
   useEffect(() => {
     setIsEPUB(false);
-  }, [setIsEPUB]);
+    registerNextPagePreloadHandler(handleNextPagePreload);
+    
+    // Cleanup: unregister when component unmounts
+    return () => {
+      registerNextPagePreloadHandler(() => {});
+    };
+  }, [setIsEPUB, registerNextPagePreloadHandler, handleNextPagePreload]);
 
   // Create wrapped functions that include margins
   const highlightPatternWithMargins = useCallback(
