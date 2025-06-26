@@ -234,6 +234,8 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
       preloadRequests.current.clear();
       // Also clear next-page preload when clearing all pending requests
       clearNextPagePreload();
+      // Reset processing state when aborting pending requests
+      setIsProcessing(false);
     }
   }, [activeHowl, clearNextPagePreload]);
 
@@ -242,9 +244,10 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
    * Used for external control of playback state
    */
   const pause = useCallback(() => {
-    abortAudio();
+    console.log('Pause function called - isPlaying:', isPlaying, 'isProcessing:', isProcessing);
+    abortAudio(true); // Clear pending requests when pausing
     setIsPlaying(false);
-  }, [abortAudio]);
+  }, [abortAudio, isPlaying, isProcessing]);
 
   /**
    * Navigates to a specific location in the document
@@ -396,15 +399,18 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
    * Toggles the playback state between playing and paused
    */
   const togglePlay = useCallback(() => {
+    console.log('TogglePlay called - current isPlaying:', isPlaying, 'isProcessing:', isProcessing);
     setIsPlaying((prev) => {
       if (!prev) {
+        console.log('Starting playback');
         return true;
       } else {
-        abortAudio();
+        console.log('Pausing playback and aborting audio');
+        abortAudio(true); // Clear pending requests when pausing
         return false;
       }
     });
-  }, [abortAudio]);
+  }, [abortAudio, isPlaying, isProcessing]);
 
 
   /**
@@ -582,7 +588,13 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
         if (error instanceof Error && error.message === 'PRELOAD_ABORTED') {
           throw error; // Re-throw but will be caught silently in preload contexts
         }
-        setIsProcessing(false);
+        // Handle regular abort errors (when user presses pause during processing)
+        if (error instanceof Error && error.name === 'AbortError') {
+          if (!preload) setIsProcessing(false);
+          console.log('TTS request aborted for sentence:', sentence.substring(0, 20));
+          throw error;
+        }
+        if (!preload) setIsProcessing(false);
         throw error;
       }
     })();
@@ -701,6 +713,12 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
         });
       } catch (error) {
         console.error('Error creating Howl instance:', error);
+        // Reset processing state for any error in createHowl
+        setIsProcessing(false);
+        // Check if this was an abort error - if so, log it differently
+        if (error instanceof Error && error.name === 'AbortError') {
+          console.log('Howl creation aborted during processSentence');
+        }
         return null;
       }
     };
@@ -717,6 +735,12 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
       console.error('Error playing TTS:', error);
       setActiveHowl(null);
       setIsProcessing(false);
+
+      // Check if this was an abort error - if so, don't show error toast
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log('TTS playback aborted');
+        return null;
+      }
 
       toast.error('Failed to process audio. Skipping problematic sentence.', {
         id: 'tts-processing-error',

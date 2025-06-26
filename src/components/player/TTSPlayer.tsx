@@ -62,7 +62,6 @@ export default function TTSPlayer({ currentPage, numPages }: {
           onClick={togglePlay}
           className="relative p-2 rounded-full text-foreground hover:bg-offbase data-[hover]:bg-offbase data-[active]:bg-offbase/80 transition-colors duration-200 focus:outline-none"
           aria-label={isPlaying ? 'Pause' : 'Play'}
-          disabled={isProcessing}
         >
           {isPlaying ? <PauseIcon /> : <PlayIcon />}
         </Button>
