@@ -51,6 +51,7 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
     currentSentence,
     currentWordIndex,
     currentSentenceAlignment,
+    currentChunk,
     skipToLocation,
   } = useTTS();
 
@@ -65,33 +66,86 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
     currDocPages,
     currDocText,
     currDocPage,
+    pdfStructure: contextPdfStructure,
   } = usePDF();
+
+  // Use structure from context if available, otherwise from live query
+  const effectivePdfStructure = contextPdfStructure || pdfStructure;
+
+  // Extract stable primitive values from currentChunk to prevent flickering
+  const chunkText = currentChunk?.text;
+  const chunkBlockId = currentChunk?.blockId;
+  const chunkPageNumber = currentChunk?.pageNumber;
+  
+  // Track what we last highlighted to avoid redundant updates
+  const lastHighlightedRef = useRef<string | null>(null);
 
   useEffect(() => {
     /*
-     * Handles highlighting the current sentence being read by TTS.
-     * Includes a small delay for smooth highlighting and cleans up on unmount.
-     * 
-     * Dependencies:
-     * - pdfText: Re-run when the text content changes
-     * - currentSentence: Re-run when the TTS position changes
-     * - highlightPattern: Function from context that could change
-     * - clearHighlights: Function from context that could change
+     * Handles highlighting the current sentence/chunk being read by TTS.
+     * Supports both block-based mode (with currentChunk) and text-based mode.
+     * Uses primitive values in dependencies to prevent constant re-renders.
      */
 
-    if (!currDocText || !pdfHighlightEnabled) {
-      clearHighlights();
+    if (!pdfHighlightEnabled) {
+      if (lastHighlightedRef.current !== null) {
+        clearHighlights();
+        lastHighlightedRef.current = null;
+      }
+      return;
+    }
+
+    // In block-based mode, use the chunk's text; otherwise use currentSentence
+    const textToHighlight = chunkText || currentSentence;
+    
+    if (!textToHighlight) {
+      if (lastHighlightedRef.current !== null) {
+        clearHighlights();
+        lastHighlightedRef.current = null;
+      }
+      return;
+    }
+
+    // Skip if we're already highlighting the same text
+    if (lastHighlightedRef.current === textToHighlight) {
       return;
     }
 
     if (containerRef.current) {
-      highlightPattern(currDocText, currentSentence || '', containerRef as RefObject<HTMLDivElement>);
+      // Get block bounding box if available for constrained highlighting
+      let blockBbox: [number, number, number, number] | undefined;
+      
+      if (chunkBlockId && effectivePdfStructure) {
+        // Find the block in the structure to get its bbox
+        for (const page of effectivePdfStructure.pages) {
+          for (const block of page.blocks) {
+            if (block.id === chunkBlockId) {
+              blockBbox = block.bbox;
+              break;
+            }
+          }
+          if (blockBbox) break;
+        }
+      }
+      
+      highlightPattern(
+        currDocText || textToHighlight,
+        textToHighlight,
+        containerRef as RefObject<HTMLDivElement>,
+        blockBbox,
+        chunkPageNumber
+      );
+      
+      lastHighlightedRef.current = textToHighlight;
     }
-
+  }, [currDocText, currentSentence, chunkText, chunkBlockId, chunkPageNumber, effectivePdfStructure, highlightPattern, clearHighlights, pdfHighlightEnabled]);
+  
+  // Clear highlights only on unmount
+  useEffect(() => {
     return () => {
       clearHighlights();
     };
-  }, [currDocText, currentSentence, highlightPattern, clearHighlights, pdfHighlightEnabled]);
+  }, [clearHighlights]);
 
   // Word-level highlight layered on top of the block highlight
   useEffect(() => {
@@ -220,7 +274,7 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
                   {showBoundingBoxes && (
                     <PDFBoundingBoxOverlay
                       pageNumber={i + 1}
-                      structure={pdfStructure}
+                      structure={effectivePdfStructure}
                       scale={currentScale()}
                       pageWidth={pageWidth}
                       pageHeight={pageHeight}
@@ -249,7 +303,7 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
                   {showBoundingBoxes && (
                     <PDFBoundingBoxOverlay
                       pageNumber={leftPage}
-                      structure={pdfStructure}
+                      structure={effectivePdfStructure}
                       scale={currentScale()}
                       pageWidth={pageWidth}
                       pageHeight={pageHeight}
@@ -274,7 +328,7 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
                   {showBoundingBoxes && (
                     <PDFBoundingBoxOverlay
                       pageNumber={rightPage}
-                      structure={pdfStructure}
+                      structure={effectivePdfStructure}
                       scale={currentScale()}
                       pageWidth={pageWidth}
                       pageHeight={pageHeight}

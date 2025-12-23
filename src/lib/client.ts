@@ -5,7 +5,6 @@ import type {
   AudiobookStatusResponse,
   CreateChapterPayload,
   VoicesResponse,
-  AlignmentPayload,
   AlignmentResponse
 } from '@/types/client';
 import type { TTSAudiobookChapter, TTSAudioBuffer } from '@/types/tts';

@@ -30,20 +30,19 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { getPdfDocument } from '@/lib/dexie';
 import { useTTS } from '@/contexts/TTSContext';
 import { useConfig } from '@/contexts/ConfigContext';
-import { processTextToSentences } from '@/lib/nlp';
+import { processTextToSentences, processBlocksToChunks } from '@/lib/nlp';
 import { withRetry, getAudiobookStatus, generateTTS, createAudiobookChapter } from '@/lib/client';
 import {
   extractTextFromPDF,
   extractTextFromPDFWithStructure,
-  extractTextFromBlocksByReadingOrder,
-  getNextBlocksByReadingOrder,
   highlightPattern,
   clearHighlights,
   clearWordHighlights,
   highlightWordIndex,
 } from '@/lib/pdf';
-import { getPdfStructure } from '@/lib/dexie';
-import type { PDFStructure } from '@/types/pdfStructure';
+import { getPdfStructure, getPdfFilter, getAppConfig } from '@/lib/dexie';
+import type { PDFStructure, PDFBlock, PDFElementFilter } from '@/types/pdfStructure';
+import type { TTSBlockChunk } from '@/types/tts';
 
 import type {
   TTSSentenceAlignment,
@@ -68,12 +67,19 @@ interface PDFContextType {
   currDocPage: number;
   currDocText: string | undefined;
   pdfDocument: PDFDocumentProxy | undefined;
+  pdfStructure: PDFStructure | null;
   setCurrentDocument: (id: string) => Promise<void>;
   clearCurrDoc: () => void;
 
   // PDF functionality
   onDocumentLoadSuccess: (pdf: PDFDocumentProxy) => void;
-  highlightPattern: (text: string, pattern: string, containerRef: RefObject<HTMLDivElement>) => void;
+  highlightPattern: (
+    text: string,
+    pattern: string,
+    containerRef: RefObject<HTMLDivElement>,
+    blockBbox?: [number, number, number, number],
+    pageNumber?: number
+  ) => void;
   clearHighlights: () => void;
   clearWordHighlights: () => void;
   highlightWordIndex: (
@@ -85,12 +91,17 @@ interface PDFContextType {
   createFullAudioBook: (onProgress: (progress: number) => void, signal?: AbortSignal, onChapterComplete?: (chapter: TTSAudiobookChapter) => void, bookId?: string, format?: TTSAudiobookFormat) => Promise<string>;
   regenerateChapter: (chapterIndex: number, bookId: string, format: TTSAudiobookFormat, signal: AbortSignal) => Promise<TTSAudiobookChapter>;
   isAudioCombining: boolean;
+  
+  // Block-based TTS
+  requestMoreBlocks: () => void;
 }
 
 // Create the context
 const PDFContext = createContext<PDFContextType | undefined>(undefined);
 
 const CONTINUATION_PREVIEW_CHARS = 600;
+// Load more raw blocks since aggregation will combine them into fewer chunks
+const BLOCKS_TO_PREFETCH = 15;
 
 /**
  * PDFProvider Component
@@ -103,7 +114,9 @@ const CONTINUATION_PREVIEW_CHARS = 600;
  */
 export function PDFProvider({ children }: { children: ReactNode }) {
   const { 
-    setText: setTTSText, 
+    setText: setTTSText,
+    setBlocks: setTTSBlocks,
+    registerBlockRequestHandler,
     stop, 
     currDocPageNumber,
     currDocPages, 
@@ -132,11 +145,18 @@ export function PDFProvider({ children }: { children: ReactNode }) {
   const [currDocId, setCurrDocId] = useState<string>();
   const [currDocText, setCurrDocText] = useState<string>();
   const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy>();
+  const [pdfStructure, setPdfStructure] = useState<PDFStructure | null>(null);
   const [isAudioCombining] = useState(false);
   const pageTextCacheRef = useRef<Map<number, string>>(new Map());
   const [currDocPage, setCurrDocPage] = useState<number>(currDocPageNumber);
   const prefetchCacheRef = useRef<Map<string, string>>(new Map());
   const currentBlockIdRef = useRef<string | null>(null);
+  
+  // Block-based TTS state
+  const currentBlockIndexRef = useRef<number>(0); // Index in globalReadingOrder
+  const loadedBlockIdsRef = useRef<Set<string>>(new Set());
+  const pdfStructureRef = useRef<PDFStructure | null>(null);
+  const pdfFilterRef = useRef<PDFElementFilter | null>(null);
 
   useEffect(() => {
     setCurrDocPage(currDocPageNumber);
@@ -154,9 +174,172 @@ export function PDFProvider({ children }: { children: ReactNode }) {
   }, [setCurrDocPages]);
 
   /**
+   * Build a map from block ID to block data with page numbers
+   */
+  const buildBlockMap = useCallback((structure: PDFStructure): Map<string, { block: PDFBlock; pageNumber: number }> => {
+    const blockMap = new Map<string, { block: PDFBlock; pageNumber: number }>();
+    for (const page of structure.pages) {
+      for (const block of page.blocks) {
+        blockMap.set(block.id, { block, pageNumber: page.pageNumber });
+      }
+    }
+    return blockMap;
+  }, []);
+
+  /**
+   * Filter blocks based on active filter settings
+   */
+  const shouldIncludeBlock = useCallback((block: PDFBlock, filter: PDFElementFilter | null): boolean => {
+    if (!filter || !filter.enabled) return true;
+    if (filter.excludedTypes.includes(block.type)) return false;
+    if (filter.excludedBboxes?.includes(block.id)) return false;
+    return true;
+  }, []);
+
+  /**
+   * Load blocks from globalReadingOrder starting at a specific index
+   * Returns chunks for TTS processing
+   */
+  const loadBlocksFromIndex = useCallback((
+    startIndex: number,
+    count: number,
+    structure: PDFStructure,
+    filter: PDFElementFilter | null
+  ): { chunks: TTSBlockChunk[]; nextIndex: number; reachedEnd: boolean } => {
+    const blockMap = buildBlockMap(structure);
+    const globalOrder = structure.globalReadingOrder;
+    
+    const blocks: PDFBlock[] = [];
+    const blockIndices: number[] = [];
+    const pageNumbers: number[] = [];
+    
+    let currentIndex = startIndex;
+    let blocksLoaded = 0;
+    
+    while (blocksLoaded < count && currentIndex < globalOrder.length) {
+      const blockId = globalOrder[currentIndex];
+      const blockData = blockMap.get(blockId);
+      
+      if (blockData) {
+        const { block, pageNumber } = blockData;
+        
+        // Apply filter
+        if (shouldIncludeBlock(block, filter) && block.text?.trim()) {
+          blocks.push(block);
+          blockIndices.push(currentIndex);
+          pageNumbers.push(pageNumber);
+          loadedBlockIdsRef.current.add(blockId);
+          blocksLoaded++;
+        }
+      }
+      
+      currentIndex++;
+    }
+    
+    const chunks = processBlocksToChunks(blocks, blockIndices, pageNumbers);
+    
+    return {
+      chunks,
+      nextIndex: currentIndex,
+      reachedEnd: currentIndex >= globalOrder.length,
+    };
+  }, [buildBlockMap, shouldIncludeBlock]);
+
+  /**
+   * Request more blocks for TTS - called by TTSContext when queue is running low
+   */
+  const requestMoreBlocks = useCallback(() => {
+    const structure = pdfStructureRef.current;
+    if (!structure) return;
+    
+    const result = loadBlocksFromIndex(
+      currentBlockIndexRef.current,
+      BLOCKS_TO_PREFETCH,
+      structure,
+      pdfFilterRef.current
+    );
+    
+    if (result.chunks.length > 0) {
+      currentBlockIndexRef.current = result.nextIndex;
+      setTTSBlocks(result.chunks, result.reachedEnd);
+    }
+  }, [loadBlocksFromIndex, setTTSBlocks]);
+
+  /**
+   * Initialize block-based TTS from a starting position
+   */
+  const initializeBlockTTS = useCallback(async (startBlockIndex: number = 0) => {
+    const docId = currDocId;
+    if (!docId) return;
+    
+    try {
+      // Load structure
+      const structureRow = await getPdfStructure(docId);
+      if (!structureRow?.structure) {
+        console.warn('No PDF structure available, falling back to page-based extraction');
+        return false;
+      }
+      
+      const structure = structureRow.structure;
+      pdfStructureRef.current = structure;
+      setPdfStructure(structure);
+      
+      // Load filter settings
+      const appConfig = await getAppConfig();
+      const globalFilter = appConfig?.pdfElementFilters || {
+        enabled: false,
+        excludedTypes: [],
+        excludedBboxes: [],
+      };
+      
+      const documentFilterRow = await getPdfFilter(docId);
+      const useGlobalFilter = documentFilterRow?.useGlobal !== false;
+      const activeFilter: PDFElementFilter = useGlobalFilter
+        ? globalFilter
+        : documentFilterRow?.filter || globalFilter;
+      
+      pdfFilterRef.current = activeFilter;
+      
+      // Reset state
+      currentBlockIndexRef.current = startBlockIndex;
+      loadedBlockIdsRef.current.clear();
+      
+      // Load initial blocks
+      const result = loadBlocksFromIndex(
+        startBlockIndex,
+        BLOCKS_TO_PREFETCH,
+        structure,
+        activeFilter
+      );
+      
+      if (result.chunks.length > 0) {
+        currentBlockIndexRef.current = result.nextIndex;
+        setTTSBlocks(result.chunks, result.reachedEnd);
+        
+        // Update current page based on first chunk
+        const firstChunk = result.chunks[0];
+        if (firstChunk) {
+          setCurrDocPage(firstChunk.pageNumber);
+        }
+        
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Error initializing block TTS:', error);
+      return false;
+    }
+  }, [currDocId, loadBlocksFromIndex, setTTSBlocks]);
+
+  // Register the block request handler with TTS context
+  useEffect(() => {
+    registerBlockRequestHandler(requestMoreBlocks);
+  }, [registerBlockRequestHandler, requestMoreBlocks]);
+
+  /**
    * Loads and processes text from the current document page
-   * Extracts text from the PDF and updates both document text and TTS text states
-   * Includes prefetching logic for next blocks in reading order
+   * Tries block-based loading first, falls back to page-based extraction
    * 
    * @returns {Promise<void>}
    */
@@ -164,15 +347,48 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     try {
       if (!pdfDocument || !currDocName) return;
 
+      const docId = currDocId;
+
+      // Try block-based loading first if we have structure
+      if (docId) {
+        const structureRow = await getPdfStructure(docId);
+        if (structureRow?.structure) {
+          // Find block index for current page
+          const structure = structureRow.structure;
+          const globalOrder = structure.globalReadingOrder;
+          const blockMap = buildBlockMap(structure);
+          
+          // Find first block on the current page
+          let startIndex = 0;
+          for (let i = 0; i < globalOrder.length; i++) {
+            const blockId = globalOrder[i];
+            const blockData = blockMap.get(blockId);
+            if (blockData && blockData.pageNumber === currDocPageNumber) {
+              startIndex = i;
+              break;
+            }
+          }
+          
+          // Initialize block-based TTS
+          const success = await initializeBlockTTS(startIndex);
+          if (success) {
+            // Set currDocText from loaded blocks for display purposes
+            const result = loadBlocksFromIndex(startIndex, 1, structure, pdfFilterRef.current);
+            if (result.chunks.length > 0) {
+              setCurrDocText(result.chunks.map(c => c.text).join(' '));
+            }
+            return;
+          }
+        }
+      }
+
+      // Fallback to page-based extraction
       const margins = {
         header: headerMargin,
         footer: footerMargin,
         left: leftMargin,
         right: rightMargin
       };
-
-      // Get document ID
-      const docId = currDocId;
 
       const getPageText = async (pageNumber: number, shouldCache = false): Promise<string> => {
         if (pageTextCacheRef.current.has(pageNumber)) {
@@ -188,35 +404,6 @@ export function PDFProvider({ children }: { children: ReactNode }) {
         if (docId) {
           try {
             extracted = await extractTextFromPDFWithStructure(docId, pdfDocument, pageNumber, margins);
-            
-            // Update current block ID for prefetching
-            const structureRow = await getPdfStructure(docId);
-          if (structureRow?.structure) {
-            const pageData = structureRow.structure.pages.find(p => p.pageNumber === pageNumber);
-            if (pageData && pageData.blocks.length > 0) {
-              // Use first block as current position (could be improved)
-              const firstBlock = pageData.blocks[0];
-              currentBlockIdRef.current = firstBlock.id;
-              
-              // Prefetch next blocks in background
-              const nextBlockIds = getNextBlocksByReadingOrder(
-                structureRow.structure,
-                firstBlock.id,
-                10 // Prefetch 10 blocks ahead
-              );
-              
-              // Prefetch in background (don't await)
-              extractTextFromBlocksByReadingOrder(docId, nextBlockIds).then(prefetchedText => {
-                // Cache prefetched text by block IDs
-                nextBlockIds.forEach((blockId, index) => {
-                  // Store partial text for each block (simplified)
-                  if (prefetchedText) {
-                    prefetchCacheRef.current.set(blockId, prefetchedText);
-                  }
-                });
-              }).catch(console.error);
-            }
-          }
           } catch (error) {
             // Fallback to original extraction
             console.warn('Structure-based extraction failed, using fallback:', error);
@@ -258,11 +445,15 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     currDocPages,
     setTTSText,
     currDocText,
+    currDocName,
     headerMargin,
     footerMargin,
     leftMargin,
     rightMargin,
     currDocId,
+    buildBlockMap,
+    initializeBlockTTS,
+    loadBlocksFromIndex,
   ]);
 
   /**
@@ -306,9 +497,14 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     setCurrDocText(undefined);
     setCurrDocPages(undefined);
     setPdfDocument(undefined);
+    setPdfStructure(null);
     pageTextCacheRef.current.clear();
     prefetchCacheRef.current.clear();
     currentBlockIdRef.current = null;
+    currentBlockIndexRef.current = 0;
+    loadedBlockIdsRef.current.clear();
+    pdfStructureRef.current = null;
+    pdfFilterRef.current = null;
     stop();
   }, [setCurrDocPages, stop]);
 
@@ -368,7 +564,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
             left: leftMargin,
             right: rightMargin
           });
-        } catch (error) {
+        } catch {
           // Fallback to original extraction
           rawText = await extractTextFromPDF(pdfDocument, pageNum, {
             header: headerMargin,
@@ -534,7 +730,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       console.error('Error creating audiobook:', error);
       throw error;
     }
-  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting, currDocId, processTextToSentences]);
+  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting, currDocId]);
 
   /**
    * Regenerates a specific chapter (page) of the PDF audiobook
@@ -564,7 +760,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
               left: leftMargin,
               right: rightMargin
             });
-          } catch (error) {
+          } catch {
             pageText = await extractTextFromPDF(pdfDocument, page, {
               header: headerMargin,
               footer: footerMargin,
@@ -602,7 +798,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
             left: leftMargin,
             right: rightMargin
           });
-        } catch (error) {
+        } catch {
           // Fallback to original extraction
           rawText = await extractTextFromPDF(pdfDocument, pageNum, {
             header: headerMargin,
@@ -690,7 +886,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       console.error('Error regenerating page:', error);
       throw error;
     }
-  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting, currDocId, processTextToSentences]);
+  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting, currDocId]);
 
   /**
    * Effect hook to initialize TTS as non-EPUB mode
@@ -725,9 +921,11 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       clearWordHighlights,
       highlightWordIndex,
       pdfDocument,
+      pdfStructure,
       createFullAudioBook,
       regenerateChapter,
       isAudioCombining,
+      requestMoreBlocks,
     }),
     [
       onDocumentLoadSuccess,
@@ -739,9 +937,11 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       currDocText,
       clearCurrDoc,
       pdfDocument,
+      pdfStructure,
       createFullAudioBook,
       regenerateChapter,
       isAudioCombining,
+      requestMoreBlocks,
     ]
   );
 

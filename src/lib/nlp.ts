@@ -6,6 +6,8 @@
  */
 
 import nlp from 'compromise';
+import type { PDFBlock } from '@/types/pdfStructure';
+import type { TTSBlockChunk } from '@/types/tts';
 
 const MAX_BLOCK_LENGTH = 450;
 
@@ -82,6 +84,254 @@ export const processTextToSentences = (text: string): string[] => {
   // Always use the full splitting logic so we consistently respect
   // sentence boundaries and quoted dialogue, even for shorter texts.
   return splitIntoSentences(text);
+};
+
+/**
+ * Processes a PDF block into TTS chunks.
+ * - If block text < MAX_BLOCK_LENGTH, returns a single chunk
+ * - If longer, splits into sentences using existing logic
+ * 
+ * @param {PDFBlock} block - The PDF block to process
+ * @param {number} blockIndex - Index of this block in globalReadingOrder
+ * @param {number} pageNumber - Page number where this block appears
+ * @returns {TTSBlockChunk[]} Array of TTS chunks for this block
+ */
+export const processBlockToChunks = (
+  block: PDFBlock,
+  blockIndex: number,
+  pageNumber: number
+): TTSBlockChunk[] => {
+  const text = block.text?.trim() || '';
+  
+  if (!text) {
+    return [];
+  }
+
+  const cleanedText = preprocessSentenceForAudio(text);
+  
+  if (!cleanedText) {
+    return [];
+  }
+
+  // Short blocks become a single chunk
+  if (cleanedText.length <= MAX_BLOCK_LENGTH) {
+    return [{
+      blockId: block.id,
+      blockIndex,
+      chunkIndex: 0,
+      totalChunksInBlock: 1,
+      text: cleanedText,
+      pageNumber,
+    }];
+  }
+
+  // Longer blocks get split into sentences/chunks
+  const sentences = splitIntoSentences(text);
+  
+  if (sentences.length === 0) {
+    // Fallback: if splitting produces nothing, return the whole text as one chunk
+    return [{
+      blockId: block.id,
+      blockIndex,
+      chunkIndex: 0,
+      totalChunksInBlock: 1,
+      text: cleanedText,
+      pageNumber,
+    }];
+  }
+
+  return sentences.map((sentenceText, idx) => ({
+    blockId: block.id,
+    blockIndex,
+    chunkIndex: idx,
+    totalChunksInBlock: sentences.length,
+    text: sentenceText,
+    pageNumber,
+  }));
+};
+
+// Pattern to detect sentence endings for aggregation logic
+const SENTENCE_ENDING = /[.?!…]["'"')\]]*\s*$/;
+
+// Minimum threshold before we consider splitting at sentence boundaries during aggregation
+const AGGREGATION_MIN_LENGTH = 200;
+
+/**
+ * Aggregated block result for TTS processing
+ */
+interface AggregatedBlock {
+  text: string;
+  representativeBlockId: string;
+  representativeBlockIndex: number;
+  pageNumber: number;
+}
+
+/**
+ * Aggregates consecutive granular blocks into logical text units for better TTS processing.
+ * This handles PDFs where blocks are very granular (e.g., one line per block).
+ * 
+ * Aggregation rules:
+ * 1. Combine consecutive blocks on the same page
+ * 2. Stop aggregating when:
+ *    - Page changes
+ *    - Block type changes (e.g., text -> heading)  
+ *    - A sentence ending is detected AND combined text exceeds AGGREGATION_MIN_LENGTH
+ * 
+ * @param {PDFBlock[]} blocks - Array of PDF blocks to aggregate
+ * @param {number[]} blockIndices - Global reading order indices for each block
+ * @param {number[]} pageNumbers - Page numbers for each block
+ * @returns {AggregatedBlock[]} Array of aggregated blocks
+ */
+export const aggregateBlocksForTTS = (
+  blocks: PDFBlock[],
+  blockIndices: number[],
+  pageNumbers: number[]
+): AggregatedBlock[] => {
+  if (blocks.length === 0) return [];
+  
+  const aggregated: AggregatedBlock[] = [];
+  
+  let currentText = '';
+  let currentBlockId = blocks[0].id;
+  let currentBlockIndex = blockIndices[0];
+  let currentPage = pageNumbers[0];
+  let currentType = blocks[0].type;
+  
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const blockIndex = blockIndices[i];
+    const pageNumber = pageNumbers[i];
+    const blockText = block.text?.trim() || '';
+    
+    if (!blockText) continue;
+    
+    // Check if we should start a new aggregated block
+    const pageChanged = pageNumber !== currentPage;
+    const typeChanged = block.type !== currentType && block.type !== 'text';
+    const isHeading = block.type === 'heading';
+    const atSentenceEnd = SENTENCE_ENDING.test(currentText);
+    const exceedsMinLength = currentText.length >= AGGREGATION_MIN_LENGTH;
+    
+    const shouldStartNewGroup = 
+      pageChanged ||
+      typeChanged ||
+      isHeading ||
+      (atSentenceEnd && exceedsMinLength);
+    
+    if (shouldStartNewGroup && currentText) {
+      // Flush current group
+      aggregated.push({
+        text: preprocessSentenceForAudio(currentText),
+        representativeBlockId: currentBlockId,
+        representativeBlockIndex: currentBlockIndex,
+        pageNumber: currentPage,
+      });
+      
+      // Start new group
+      currentText = blockText;
+      currentBlockId = block.id;
+      currentBlockIndex = blockIndex;
+      currentPage = pageNumber;
+      currentType = block.type;
+    } else {
+      // Continue aggregating
+      if (currentText) {
+        // Add space if needed between blocks
+        if (!currentText.endsWith(' ') && !blockText.startsWith(' ')) {
+          currentText += ' ';
+        }
+        currentText += blockText;
+      } else {
+        // First block in group
+        currentText = blockText;
+        currentBlockId = block.id;
+        currentBlockIndex = blockIndex;
+        currentPage = pageNumber;
+        currentType = block.type;
+      }
+    }
+  }
+  
+  // Don't forget the last group
+  if (currentText) {
+    aggregated.push({
+      text: preprocessSentenceForAudio(currentText),
+      representativeBlockId: currentBlockId,
+      representativeBlockIndex: currentBlockIndex,
+      pageNumber: currentPage,
+    });
+  }
+  
+  return aggregated;
+};
+
+/**
+ * Processes multiple PDF blocks into a flattened array of TTS chunks.
+ * First aggregates consecutive granular blocks, then processes each aggregated unit.
+ * 
+ * @param {PDFBlock[]} blocks - Array of PDF blocks to process
+ * @param {number[]} blockIndices - Global reading order indices for each block
+ * @param {number[]} pageNumbers - Page numbers for each block
+ * @returns {TTSBlockChunk[]} Flattened array of all TTS chunks
+ */
+export const processBlocksToChunks = (
+  blocks: PDFBlock[],
+  blockIndices: number[],
+  pageNumbers: number[]
+): TTSBlockChunk[] => {
+  // First aggregate consecutive granular blocks
+  const aggregatedBlocks = aggregateBlocksForTTS(blocks, blockIndices, pageNumbers);
+  
+  const allChunks: TTSBlockChunk[] = [];
+  
+  for (const aggregated of aggregatedBlocks) {
+    const { text, representativeBlockId, representativeBlockIndex, pageNumber } = aggregated;
+    
+    if (!text) continue;
+    
+    // Short aggregated blocks become a single chunk
+    if (text.length <= MAX_BLOCK_LENGTH) {
+      allChunks.push({
+        blockId: representativeBlockId,
+        blockIndex: representativeBlockIndex,
+        chunkIndex: 0,
+        totalChunksInBlock: 1,
+        text,
+        pageNumber,
+      });
+      continue;
+    }
+    
+    // Longer aggregated blocks get split into sentences
+    const sentences = splitIntoSentences(text);
+    
+    if (sentences.length === 0) {
+      // Fallback: return whole text as one chunk
+      allChunks.push({
+        blockId: representativeBlockId,
+        blockIndex: representativeBlockIndex,
+        chunkIndex: 0,
+        totalChunksInBlock: 1,
+        text,
+        pageNumber,
+      });
+      continue;
+    }
+    
+    // Create chunks for each sentence
+    for (let idx = 0; idx < sentences.length; idx++) {
+      allChunks.push({
+        blockId: representativeBlockId,
+        blockIndex: representativeBlockIndex,
+        chunkIndex: idx,
+        totalChunksInBlock: sentences.length,
+        text: sentences[idx],
+        pageNumber,
+      });
+    }
+  }
+  
+  return allChunks;
 };
 
 /**

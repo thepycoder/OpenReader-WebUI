@@ -59,6 +59,23 @@ export interface TTSSentenceAlignment {
   words: TTSSentenceWord[];
 }
 
+// Block-based TTS chunk representing a portion of a PDF block for TTS processing
+export interface TTSBlockChunk {
+  blockId: string;           // Source block ID from PDF structure
+  blockIndex: number;        // Index in globalReadingOrder
+  chunkIndex: number;        // Index within block (0 if single chunk)
+  totalChunksInBlock: number;
+  text: string;
+  pageNumber: number;
+}
+
+// Queue of block chunks for TTS playback
+export interface TTSBlockQueue {
+  chunks: TTSBlockChunk[];   // Flattened queue of all chunks
+  currentIndex: number;
+  prefetchedBlockIds: Set<string>;
+}
+
 // Supported output formats for generated audiobooks
 export type TTSAudiobookFormat = 'mp3' | 'm4b';
 

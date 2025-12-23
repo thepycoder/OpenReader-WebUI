@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PDFStructure, PDFBlockType } from '@/types/pdfStructure';
 
 interface PDFBoundingBoxOverlayProps {
@@ -41,6 +41,13 @@ export function PDFBoundingBoxOverlay({
   pageHeight,
 }: PDFBoundingBoxOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const MAX_RETRIES = 10; // Maximum number of retries before giving up
+
+  // Reset retry count when page changes
+  useEffect(() => {
+    setRetryCount(0);
+  }, [pageNumber]);
 
   useEffect(() => {
     if (!structure || !overlayRef.current) return;
@@ -61,17 +68,14 @@ export function PDFBoundingBoxOverlay({
     
     if (!canvas) {
       // Canvas not ready yet, retry after a short delay
-      const timeoutId = setTimeout(() => {
-        // Re-trigger effect by checking if canvas is now available
-        if (overlayRef.current && overlayRef.current.parentElement) {
-          const retryCanvas = overlayRef.current.parentElement.querySelector('.react-pdf__Page__canvas');
-          if (retryCanvas) {
-            // Force re-render by updating a dependency
-            window.dispatchEvent(new Event('resize'));
-          }
-        }
-      }, 100);
-      return () => clearTimeout(timeoutId);
+      // Use retryCount state to trigger effect re-run
+      if (retryCount < MAX_RETRIES) {
+        const timeoutId = setTimeout(() => {
+          setRetryCount(prev => prev + 1);
+        }, 100);
+        return () => clearTimeout(timeoutId);
+      }
+      return; // Give up after max retries
     }
     
     // Get the actual rendered size of the canvas
@@ -96,7 +100,7 @@ export function PDFBoundingBoxOverlay({
       
       // Skip boxes with invalid dimensions
       if (width <= 0 || height <= 0) return;
-      
+
       const box = document.createElement('div');
       box.className = 'pdf-bounding-box';
       box.style.position = 'absolute';
@@ -130,7 +134,7 @@ export function PDFBoundingBoxOverlay({
       
       overlay.appendChild(box);
     });
-  }, [pageNumber, structure, scale, pageWidth, pageHeight]);
+  }, [pageNumber, structure, scale, pageWidth, pageHeight, retryCount]);
 
   if (!structure) return null;
 

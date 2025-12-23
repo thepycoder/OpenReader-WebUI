@@ -46,6 +46,7 @@ import type {
   TTSPlaybackState,
   TTSSentenceAlignment,
   TTSAudioBuffer,
+  TTSBlockChunk,
 } from '@/types/tts';
 import type {
   TTSRequestPayload,
@@ -70,6 +71,9 @@ interface TTSContextType extends TTSPlaybackState {
   // Alignment metadata for the current sentence
   currentSentenceAlignment?: TTSSentenceAlignment;
   currentWordIndex?: number | null;
+  
+  // Current chunk info (block-based mode)
+  currentChunk?: TTSBlockChunk | null;
 
   // Control functions
   togglePlay: () => void;
@@ -79,6 +83,7 @@ interface TTSContextType extends TTSPlaybackState {
   stop: () => void;
   stopAndPlayFromIndex: (index: number) => void;
   setText: (text: string, options?: boolean | SetTextOptions) => void;
+  setBlocks: (chunks: TTSBlockChunk[], isEnd?: boolean) => void;
   setCurrDocPages: (num: number | undefined) => void;
   setSpeedAndRestart: (speed: number) => void;
   setAudioPlayerSpeedAndRestart: (speed: number) => void;
@@ -86,6 +91,7 @@ interface TTSContextType extends TTSPlaybackState {
   skipToLocation: (location: TTSLocation, shouldPause?: boolean) => void;
   registerLocationChangeHandler: (handler: (location: TTSLocation) => void) => void;  // EPUB-only: Handles chapter navigation
   registerVisualPageChangeHandler: (handler: (location: TTSLocation) => void) => void;
+  registerBlockRequestHandler: (handler: () => void) => void;  // PDF: Request more blocks
   setIsEPUB: (isEPUB: boolean) => void;
 }
 
@@ -323,6 +329,19 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     visualPageChangeHandlerRef.current = handler;
   }, []);
 
+  // Add ref for block request handler (PDF block-based mode)
+  const blockRequestHandlerRef = useRef<(() => void) | null>(null);
+
+  /**
+   * Registers a handler function for requesting more blocks from PDFContext
+   * Used for block-based PDF TTS mode
+   * 
+   * @param {Function} handler - Function to request more blocks
+   */
+  const registerBlockRequestHandler = useCallback((handler: () => void) => {
+    blockRequestHandlerRef.current = handler;
+  }, []);
+
   // Get document ID from URL params
   const { id } = useParams();
 
@@ -345,6 +364,15 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   const [voice, setVoice] = useState(configVoice);
   const [ttsModel, setTTSModel] = useState(configTTSModel);
   const [ttsInstructions, setTTSInstructions] = useState(configTTSInstructions);
+
+  // Block-based TTS state
+  const [chunks, setChunks] = useState<TTSBlockChunk[]>([]);
+  const [chunkIndex, setChunkIndex] = useState(0);
+  const [isBlockMode, setIsBlockMode] = useState(false);
+  const [isEndOfBlocks, setIsEndOfBlocks] = useState(false);
+  const chunksRef = useRef<TTSBlockChunk[]>([]);
+  const chunkIndexRef = useRef(0);
+  const lastPageRef = useRef<number | null>(null);
 
   // Track pending preload requests
   const preloadRequests = useRef<Map<string, Promise<string>>>(new Map());
@@ -372,6 +400,14 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   useEffect(() => {
     currentIndexRef.current = currentIndex;
   }, [currentIndex]);
+
+  useEffect(() => {
+    chunksRef.current = chunks;
+  }, [chunks]);
+
+  useEffect(() => {
+    chunkIndexRef.current = chunkIndex;
+  }, [chunkIndex]);
 
   /**
    * Processes text into sentences using the shared NLP utility
@@ -436,16 +472,69 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     if (shouldPause) setIsPlaying(false);
     setCurrentIndex(0);
     setSentences([]);
+    setChunks([]);
+    setChunkIndex(0);
+    setIsBlockMode(false);
+    setIsEndOfBlocks(false);
     setCurrDocPage(location);
 
   }, [abortAudio]);
 
   /**
-   * Moves to the next or previous sentence
+   * Moves to the next or previous chunk/sentence
+   * Handles both block-based mode (PDF with structure) and text-based mode
    * 
    * @param {boolean} [backwards=false] - Whether to move backwards
    */
   const advance = useCallback(async (backwards = false) => {
+    // Block-based mode (PDF with structure)
+    if (isBlockMode && !isEPUB) {
+      const nextChunkIdx = chunkIndex + (backwards ? -1 : 1);
+      
+      // Within current chunks queue
+      if (nextChunkIdx >= 0 && nextChunkIdx < chunks.length) {
+        setChunkIndex(nextChunkIdx);
+        
+        // Update page if chunk is on a different page
+        const nextChunk = chunks[nextChunkIdx];
+        if (nextChunk && nextChunk.pageNumber !== lastPageRef.current) {
+          lastPageRef.current = nextChunk.pageNumber;
+          setCurrDocPage(nextChunk.pageNumber);
+          visualPageChangeHandlerRef.current?.(nextChunk.pageNumber);
+        }
+        
+        // Request more blocks if running low (3 chunks from end)
+        if (!isEndOfBlocks && nextChunkIdx >= chunks.length - 3 && blockRequestHandlerRef.current) {
+          blockRequestHandlerRef.current();
+        }
+        
+        return;
+      }
+      
+      // Going backwards past start - not supported in block mode currently
+      if (nextChunkIdx < 0) {
+        return;
+      }
+      
+      // Going forward past end
+      if (nextChunkIdx >= chunks.length) {
+        if (isEndOfBlocks) {
+          // End of document
+          setIsPlaying(false);
+          return;
+        }
+        
+        // Request more blocks
+        if (blockRequestHandlerRef.current) {
+          blockRequestHandlerRef.current();
+        }
+        return;
+      }
+      
+      return;
+    }
+    
+    // Text-based mode (legacy, EPUB, or PDF without structure)
     const nextIndex = currentIndex + (backwards ? -1 : 1);
 
     // Handle within current page bounds
@@ -475,7 +564,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
         setIsPlaying(false);
       }
     }
-  }, [currentIndex, sentences, currDocPageNumber, currDocPages, isEPUB, skipToLocation]);
+  }, [currentIndex, sentences, currDocPageNumber, currDocPages, isEPUB, skipToLocation, isBlockMode, chunkIndex, chunks, isEndOfBlocks]);
 
   /**
    * Handles blank text sections based on document type
@@ -659,6 +748,70 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
         });
       });
   }, [isPlaying, handleBlankSection, abortAudio, processTextToSentencesLocal, pendingRestoreIndex, isEPUB, smartSentenceSplitting]);
+
+  /**
+   * Sets blocks for block-based TTS mode (PDF with structure)
+   * Appends new chunks to the existing queue or replaces if starting fresh
+   * 
+   * @param {TTSBlockChunk[]} newChunks - New chunks to add
+   * @param {boolean} isEnd - Whether this is the end of the document
+   */
+  const setBlocks = useCallback((newChunks: TTSBlockChunk[], isEnd = false) => {
+    if (!newChunks || newChunks.length === 0) {
+      return;
+    }
+    
+    const wasPlaying = isPlaying;
+    
+    // If not in block mode yet, switch to it and replace chunks
+    if (!isBlockMode) {
+      setIsBlockMode(true);
+      setChunks(newChunks);
+      setChunkIndex(0);
+      setIsEndOfBlocks(isEnd);
+      
+      // Set initial page
+      const firstChunk = newChunks[0];
+      if (firstChunk) {
+        lastPageRef.current = firstChunk.pageNumber;
+        setCurrDocPage(firstChunk.pageNumber);
+      }
+      
+      // Clear text-based state
+      setSentences([]);
+      setCurrentIndex(0);
+      
+      // Reset alignment state
+      sentenceAlignmentCacheRef.current.clear();
+      setCurrentSentenceAlignment(undefined);
+      setCurrentWordIndex(null);
+      
+      setIsProcessing(false);
+      
+      // Resume playback if it was playing
+      if (wasPlaying) {
+        setIsPlaying(true);
+      }
+      
+      return;
+    }
+    
+    // Already in block mode - append new chunks
+    setChunks(prevChunks => {
+      // Filter out duplicates by blockId + chunkIndex
+      const existingKeys = new Set(
+        prevChunks.map(c => `${c.blockId}:${c.chunkIndex}`)
+      );
+      const uniqueNewChunks = newChunks.filter(
+        c => !existingKeys.has(`${c.blockId}:${c.chunkIndex}`)
+      );
+      return [...prevChunks, ...uniqueNewChunks];
+    });
+    
+    if (isEnd) {
+      setIsEndOfBlocks(true);
+    }
+  }, [isPlaying, isBlockMode]);
 
   /**
    * Toggles the playback state between playing and paused
@@ -1118,9 +1271,24 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   }, [isPlaying, advance, activeHowl, processSentence, audioSpeed]);
 
   const playAudio = useCallback(async () => {
-    const sentence = sentences[currentIndex];
+    // Get current text to play - from chunks in block mode, sentences otherwise
+    let textToPlay: string;
+    let playbackIndex: number;
+    
+    if (isBlockMode && !isEPUB) {
+      const chunk = chunks[chunkIndex];
+      if (!chunk) return;
+      textToPlay = chunk.text;
+      playbackIndex = chunkIndex;
+    } else {
+      textToPlay = sentences[currentIndex];
+      playbackIndex = currentIndex;
+    }
+    
+    if (!textToPlay) return;
+    
     const alignmentKey = buildCacheKey(
-      sentence,
+      textToPlay,
       voice,
       speed,
       configTTSProvider,
@@ -1135,11 +1303,11 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
       setCurrentWordIndex(null);
     }
 
-    const howl = await playSentenceWithHowl(sentence, currentIndex);
+    const howl = await playSentenceWithHowl(textToPlay, playbackIndex);
     if (howl) {
       howl.play();
     }
-  }, [sentences, currentIndex, playSentenceWithHowl, voice, speed, configTTSProvider, ttsModel]);
+  }, [sentences, currentIndex, chunks, chunkIndex, isBlockMode, isEPUB, playSentenceWithHowl, voice, speed, configTTSProvider, ttsModel]);
 
   // Place useBackgroundState after playAudio is defined
   const isBackgrounded = useBackgroundState({
@@ -1190,23 +1358,37 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
   }, [activeHowl, isPlaying, currentSentenceAlignment]);
 
   /**
-   * Preloads the next sentence's audio
+   * Preloads the next sentence/chunk's audio
    */
   const preloadNextAudio = useCallback(async () => {
     try {
-      const nextSentence = sentences[currentIndex + 1];
-      if (nextSentence) {
+      // Get next text to preload - from chunks in block mode, sentences otherwise
+      let nextText: string | undefined;
+      
+      if (isBlockMode && !isEPUB) {
+        const nextChunk = chunks[chunkIndex + 1];
+        nextText = nextChunk?.text;
+        
+        // Also request more blocks if running low
+        if (!isEndOfBlocks && chunkIndex >= chunks.length - 3 && blockRequestHandlerRef.current) {
+          blockRequestHandlerRef.current();
+        }
+      } else {
+        nextText = sentences[currentIndex + 1];
+      }
+      
+      if (nextText) {
         const nextKey = buildCacheKey(
-          nextSentence,
+          nextText,
           voice,
           speed,
           configTTSProvider,
           ttsModel,
         );
 
-        if (!audioCache.has(nextKey) && !preloadRequests.current.has(nextSentence)) {
+        if (!audioCache.has(nextKey) && !preloadRequests.current.has(nextText)) {
         // Start preloading but don't wait for it to complete
-          processSentence(nextSentence, true).catch(error => {
+          processSentence(nextText, true).catch(error => {
             console.error('Error preloading next sentence:', error);
           });
         }
@@ -1214,23 +1396,30 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     } catch (error) {
       console.error('Error initiating preload:', error);
     }
-  }, [currentIndex, sentences, audioCache, processSentence, voice, speed, configTTSProvider, ttsModel]);
+  }, [currentIndex, sentences, chunks, chunkIndex, isBlockMode, isEPUB, isEndOfBlocks, audioCache, processSentence, voice, speed, configTTSProvider, ttsModel]);
 
   /**
    * Main Playback Driver
    * Controls the flow of audio playback and sentence processing
+   * Handles both block-based mode (chunks) and text-based mode (sentences)
    */
   useEffect(() => {
     if (!isPlaying) return; // Don't proceed if stopped
     if (isProcessing) return; // Don't proceed if processing audio
-    if (!sentences[currentIndex]) return; // Don't proceed if no sentence to play
     if (activeHowl) return; // Don't proceed if audio is already playing
     if (isBackgrounded) return; // Don't proceed if backgrounded
+    
+    // Check for content to play based on mode
+    const hasContent = isBlockMode && !isEPUB
+      ? chunks[chunkIndex]?.text
+      : sentences[currentIndex];
+    
+    if (!hasContent) return; // Don't proceed if no content to play
 
-    // Start playing current sentence
+    // Start playing current sentence/chunk
     playAudio();
 
-    // Start preloading next sentence in parallel
+    // Start preloading next sentence/chunk in parallel
     preloadNextAudio();
 
     return () => {
@@ -1244,6 +1433,10 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     isProcessing,
     currentIndex,
     sentences,
+    chunks,
+    chunkIndex,
+    isBlockMode,
+    isEPUB,
     activeHowl,
     isBackgrounded,
     playAudio,
@@ -1258,11 +1451,17 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     // Cancel any ongoing request
     abortAudio();
     locationChangeHandlerRef.current = null;
+    blockRequestHandlerRef.current = null;
     epubContinuationRef.current = null;
     continuationCarryRef.current.clear();
     setIsPlaying(false);
     setCurrentIndex(0);
     setSentences([]);
+    setChunks([]);
+    setChunkIndex(0);
+    setIsBlockMode(false);
+    setIsEndOfBlocks(false);
+    lastPageRef.current = null;
     setCurrDocPage(1);
     setCurrDocPages(undefined);
     setIsProcessing(false);
@@ -1380,6 +1579,14 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     });
   }, [abortAudio, updateConfigKey, isPlaying]);
 
+  // Get the current chunk in block mode
+  const currentChunk = isBlockMode && !isEPUB ? chunks[chunkIndex] : null;
+  
+  // Get current sentence - from chunk in block mode, sentences array otherwise
+  const currentSentence = isBlockMode && !isEPUB
+    ? (currentChunk?.text || '')
+    : (sentences[currentIndex] || '');
+
   /**
    * Provides the TTS context value to child components
    */
@@ -1387,9 +1594,10 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     isPlaying,
     isProcessing,
     isBackgrounded,
-    currentSentence: sentences[currentIndex] || '',
+    currentSentence,
     currentSentenceAlignment,
     currentWordIndex,
+    currentChunk,
     currDocPage,
     currDocPageNumber,
     currDocPages,
@@ -1401,6 +1609,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     pause,
     stopAndPlayFromIndex,
     setText,
+    setBlocks,
     setCurrDocPages,
     setSpeedAndRestart,
     setAudioPlayerSpeedAndRestart,
@@ -1408,13 +1617,14 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     skipToLocation,
     registerLocationChangeHandler,
     registerVisualPageChangeHandler,
+    registerBlockRequestHandler,
     setIsEPUB
   }), [
     isPlaying,
     isProcessing,
     isBackgrounded,
-    sentences,
-    currentIndex,
+    currentSentence,
+    currentChunk,
     currDocPage,
     currDocPageNumber,
     currDocPages,
@@ -1426,6 +1636,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     pause,
     stopAndPlayFromIndex,
     setText,
+    setBlocks,
     setCurrDocPages,
     setSpeedAndRestart,
     setAudioPlayerSpeedAndRestart,
@@ -1433,6 +1644,7 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     skipToLocation,
     registerLocationChangeHandler,
     registerVisualPageChangeHandler,
+    registerBlockRequestHandler,
     setIsEPUB,
     currentSentenceAlignment,
     currentWordIndex

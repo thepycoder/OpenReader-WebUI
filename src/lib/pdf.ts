@@ -498,7 +498,12 @@ export function clearWordHighlights() {
 export function highlightPattern(
   text: string,
   pattern: string,
-  containerRef: React.RefObject<HTMLDivElement>
+  containerRef: React.RefObject<HTMLDivElement>,
+  // Reserved for future position-based filtering:
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  blockBbox?: [number, number, number, number],
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  pageNumber?: number
 ) {
   clearSentenceHighlights();
 
@@ -512,9 +517,14 @@ export function highlightPattern(
   lastSentenceWordToTokenMap = null;
   lastSentenceTokenWindow = null;
 
+  // Select spans - optionally filter by page number if provided
+  const selector = '.react-pdf__Page__textContent span';
   const spanNodes = Array.from(
-    container.querySelectorAll('.react-pdf__Page__textContent span')
+    container.querySelectorAll(selector)
   ) as HTMLElement[];
+  
+  // Note: blockBbox and pageNumber parameters are reserved for future use
+  // when we implement position-based span filtering
 
   if (!spanNodes.length) return;
   lastSpanNodes = spanNodes;
