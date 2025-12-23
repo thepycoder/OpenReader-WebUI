@@ -89,9 +89,11 @@ interface TTSContextType extends TTSPlaybackState {
   setAudioPlayerSpeedAndRestart: (speed: number) => void;
   setVoiceAndRestart: (voice: string) => void;
   skipToLocation: (location: TTSLocation, shouldPause?: boolean) => void;
+  skipToChunkByBlockId: (blockId: string) => boolean;  // PDF: Jump to a specific block by ID
   registerLocationChangeHandler: (handler: (location: TTSLocation) => void) => void;  // EPUB-only: Handles chapter navigation
   registerVisualPageChangeHandler: (handler: (location: TTSLocation) => void) => void;
   registerBlockRequestHandler: (handler: () => void) => void;  // PDF: Request more blocks
+  registerBlockJumpHandler: (handler: (blockId: string) => void) => void;  // PDF: Jump to block from PDFContext
   setIsEPUB: (isEPUB: boolean) => void;
 }
 
@@ -340,6 +342,19 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
    */
   const registerBlockRequestHandler = useCallback((handler: () => void) => {
     blockRequestHandlerRef.current = handler;
+  }, []);
+
+  // Add ref for block jump handler (PDF block navigation)
+  const blockJumpHandlerRef = useRef<((blockId: string) => void) | null>(null);
+
+  /**
+   * Registers a handler function for jumping to a specific block from PDFContext
+   * Called when user clicks on a block in the bounding box overlay
+   * 
+   * @param {Function} handler - Function to jump to a specific block
+   */
+  const registerBlockJumpHandler = useCallback((handler: (blockId: string) => void) => {
+    blockJumpHandlerRef.current = handler;
   }, []);
 
   // Get document ID from URL params
@@ -1359,38 +1374,60 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
 
   /**
    * Preloads the next sentence/chunk's audio
+   * In block mode, prefetches multiple blocks ahead for smoother playback
    */
   const preloadNextAudio = useCallback(async () => {
     try {
-      // Get next text to preload - from chunks in block mode, sentences otherwise
-      let nextText: string | undefined;
+      // Number of items to prefetch ahead
+      const PREFETCH_COUNT = 5;
       
       if (isBlockMode && !isEPUB) {
-        const nextChunk = chunks[chunkIndex + 1];
-        nextText = nextChunk?.text;
-        
-        // Also request more blocks if running low
-        if (!isEndOfBlocks && chunkIndex >= chunks.length - 3 && blockRequestHandlerRef.current) {
+        // Block mode: prefetch multiple chunks ahead
+        // Request more blocks earlier if running low (5 chunks from end)
+        if (!isEndOfBlocks && chunkIndex >= chunks.length - 5 && blockRequestHandlerRef.current) {
           blockRequestHandlerRef.current();
         }
-      } else {
-        nextText = sentences[currentIndex + 1];
-      }
-      
-      if (nextText) {
-        const nextKey = buildCacheKey(
-          nextText,
-          voice,
-          speed,
-          configTTSProvider,
-          ttsModel,
-        );
+        
+        // Prefetch the next PREFETCH_COUNT chunks
+        for (let i = 1; i <= PREFETCH_COUNT; i++) {
+          const nextChunk = chunks[chunkIndex + i];
+          if (!nextChunk?.text) continue;
+          
+          const nextKey = buildCacheKey(
+            nextChunk.text,
+            voice,
+            speed,
+            configTTSProvider,
+            ttsModel,
+          );
 
-        if (!audioCache.has(nextKey) && !preloadRequests.current.has(nextText)) {
-        // Start preloading but don't wait for it to complete
-          processSentence(nextText, true).catch(error => {
-            console.error('Error preloading next sentence:', error);
-          });
+          if (!audioCache.has(nextKey) && !preloadRequests.current.has(nextChunk.text)) {
+            // Start preloading but don't wait for it to complete
+            processSentence(nextChunk.text, true).catch(error => {
+              console.error('Error preloading chunk:', error);
+            });
+          }
+        }
+      } else {
+        // Sentence mode: prefetch multiple sentences ahead
+        for (let i = 1; i <= PREFETCH_COUNT; i++) {
+          const nextText = sentences[currentIndex + i];
+          if (!nextText) continue;
+          
+          const nextKey = buildCacheKey(
+            nextText,
+            voice,
+            speed,
+            configTTSProvider,
+            ttsModel,
+          );
+
+          if (!audioCache.has(nextKey) && !preloadRequests.current.has(nextText)) {
+            // Start preloading but don't wait for it to complete
+            processSentence(nextText, true).catch(error => {
+              console.error('Error preloading next sentence:', error);
+            });
+          }
         }
       }
     } catch (error) {
@@ -1481,6 +1518,47 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
 
     setCurrentIndex(index);
     setIsPlaying(true);
+  }, [abortAudio]);
+
+  /**
+   * Jumps to a specific block by its ID in block-based mode
+   * Searches current chunks first, then calls the block jump handler to reload if not found
+   * 
+   * @param {string} blockId - The block ID to jump to
+   * @returns {boolean} True if the block was found in current chunks
+   */
+  const skipToChunkByBlockId = useCallback((blockId: string): boolean => {
+    // First, check if the block is already in our current chunks
+    const chunkIdx = chunksRef.current.findIndex(c => c.blockId === blockId);
+    
+    if (chunkIdx !== -1) {
+      // Block is in current queue - jump to it
+      abortAudio();
+      setChunkIndex(chunkIdx);
+      
+      // Update page if needed
+      const targetChunk = chunksRef.current[chunkIdx];
+      if (targetChunk && targetChunk.pageNumber !== lastPageRef.current) {
+        lastPageRef.current = targetChunk.pageNumber;
+        setCurrDocPage(targetChunk.pageNumber);
+        visualPageChangeHandlerRef.current?.(targetChunk.pageNumber);
+      }
+      
+      setIsPlaying(true);
+      return true;
+    }
+    
+    // Block not in current queue - ask PDFContext to reload from this block
+    if (blockJumpHandlerRef.current) {
+      abortAudio(true);
+      setChunks([]);
+      setChunkIndex(0);
+      blockJumpHandlerRef.current(blockId);
+      setIsPlaying(true);
+      return true;
+    }
+    
+    return false;
   }, [abortAudio]);
 
   /**
@@ -1615,9 +1693,11 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     setAudioPlayerSpeedAndRestart,
     setVoiceAndRestart,
     skipToLocation,
+    skipToChunkByBlockId,
     registerLocationChangeHandler,
     registerVisualPageChangeHandler,
     registerBlockRequestHandler,
+    registerBlockJumpHandler,
     setIsEPUB
   }), [
     isPlaying,
@@ -1642,9 +1722,11 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
     setAudioPlayerSpeedAndRestart,
     setVoiceAndRestart,
     skipToLocation,
+    skipToChunkByBlockId,
     registerLocationChangeHandler,
     registerVisualPageChangeHandler,
     registerBlockRequestHandler,
+    registerBlockJumpHandler,
     setIsEPUB,
     currentSentenceAlignment,
     currentWordIndex

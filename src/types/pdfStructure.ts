@@ -1,4 +1,20 @@
-export type PDFBlockType = 'text' | 'heading' | 'image' | 'figure' | 'table' | 'caption' | 'header' | 'footer';
+// All block types from pymupdf-layout classification
+export type PDFBlockType = 
+  | 'text'           // Regular paragraph text
+  | 'title'          // Document/section title
+  | 'section-header' // Section heading
+  | 'page-header'    // Page header (running header)
+  | 'page-footer'    // Page footer (running footer)
+  | 'image'          // Image element
+  | 'figure'         // Figure/diagram
+  | 'picture'        // Picture element
+  | 'table'          // Table structure
+  | 'table-fallback' // Table that couldn't be fully parsed
+  | 'caption'        // Caption for figures/tables
+  | 'list-item'      // List item
+  | 'footnote'       // Footnote text
+  | 'formula'        // Mathematical formula
+  | 'code';          // Code block
 
 export interface PDFBlock {
   id: string;

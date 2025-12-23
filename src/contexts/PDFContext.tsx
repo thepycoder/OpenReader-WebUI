@@ -94,6 +94,7 @@ interface PDFContextType {
   
   // Block-based TTS
   requestMoreBlocks: () => void;
+  jumpToBlock: (blockId: string) => void;
 }
 
 // Create the context
@@ -117,6 +118,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     setText: setTTSText,
     setBlocks: setTTSBlocks,
     registerBlockRequestHandler,
+    registerBlockJumpHandler,
     stop, 
     currDocPageNumber,
     currDocPages, 
@@ -356,10 +358,41 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     return false;
   }, [loadBlocksFromIndex, setTTSBlocks]);
 
+  /**
+   * Jump to a specific block by its ID
+   * Finds the block's index in globalReadingOrder and reinitializes TTS from there
+   * 
+   * @param {string} blockId - The block ID to jump to
+   */
+  const jumpToBlock = useCallback((blockId: string) => {
+    const structure = pdfStructureRef.current;
+    if (!structure) return;
+    
+    const globalOrder = structure.globalReadingOrder;
+    const blockIndex = globalOrder.indexOf(blockId);
+    
+    if (blockIndex === -1) {
+      console.warn('Block not found in globalReadingOrder:', blockId);
+      return;
+    }
+    
+    // Reset loading state
+    textLoadedForPageRef.current = null;
+    loadedBlockIdsRef.current.clear();
+    
+    // Initialize TTS from this block
+    initializeBlockTTS(blockIndex);
+  }, [initializeBlockTTS]);
+
   // Register the block request handler with TTS context
   useEffect(() => {
     registerBlockRequestHandler(requestMoreBlocks);
   }, [registerBlockRequestHandler, requestMoreBlocks]);
+
+  // Register the block jump handler with TTS context
+  useEffect(() => {
+    registerBlockJumpHandler(jumpToBlock);
+  }, [registerBlockJumpHandler, jumpToBlock]);
 
   /**
    * Loads and processes text from the current document page
@@ -872,6 +905,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       regenerateChapter,
       isAudioCombining,
       requestMoreBlocks,
+      jumpToBlock,
     }),
     [
       onDocumentLoadSuccess,
@@ -888,6 +922,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       regenerateChapter,
       isAudioCombining,
       requestMoreBlocks,
+      jumpToBlock,
     ]
   );
 

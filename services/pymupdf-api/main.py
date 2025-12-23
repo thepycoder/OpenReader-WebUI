@@ -30,32 +30,6 @@ app.add_middleware(
 )
 
 
-def map_boxclass_to_type(boxclass: str) -> str:
-    """
-    Map pymupdf-layout boxclass to our standard types.
-    boxclass values: 'page-header', 'page-footer', 'section-header', 'text', 'image', 'table', etc.
-    We map to: 'text', 'heading', 'image', 'figure', 'table', 'caption', 'header', 'footer'
-    """
-    # Direct mappings from boxclass
-    type_mapping = {
-        "page-header": "header",
-        "page-footer": "footer",
-        "section-header": "heading",
-        "title": "heading",
-        "heading": "heading",
-        "text": "text",
-        "image": "figure",
-        "figure": "figure",
-        "table": "table",
-        "caption": "caption",
-        "list": "text",
-        "code": "text",
-        "footnote": "footer",
-    }
-    
-    return type_mapping.get(boxclass, "text")
-
-
 def extract_text_from_textlines(textlines: List[Dict[str, Any]]) -> str:
     """Extract text content from textlines array."""
     if not textlines:

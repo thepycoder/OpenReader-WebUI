@@ -53,6 +53,7 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
     currentSentenceAlignment,
     currentChunk,
     skipToLocation,
+    skipToChunkByBlockId,
   } = useTTS();
 
   // PDF context
@@ -79,6 +80,13 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
   
   // Track what we last highlighted to avoid redundant updates
   const lastHighlightedRef = useRef<string | null>(null);
+
+  /**
+   * Handle click on a bounding box block to jump to that block in TTS
+   */
+  const handleBlockClick = useCallback((blockId: string, _pageNumber: number) => {
+    skipToChunkByBlockId(blockId);
+  }, [skipToChunkByBlockId]);
 
   useEffect(() => {
     /*
@@ -278,6 +286,8 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
                       scale={currentScale()}
                       pageWidth={pageWidth}
                       pageHeight={pageHeight}
+                      onBlockClick={handleBlockClick}
+                      currentBlockId={chunkBlockId}
                     />
                   )}
                 </div>
@@ -307,6 +317,8 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
                       scale={currentScale()}
                       pageWidth={pageWidth}
                       pageHeight={pageHeight}
+                      onBlockClick={handleBlockClick}
+                      currentBlockId={chunkBlockId}
                     />
                   )}
                 </div>
@@ -332,6 +344,8 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
                       scale={currentScale()}
                       pageWidth={pageWidth}
                       pageHeight={pageHeight}
+                      onBlockClick={handleBlockClick}
+                      currentBlockId={chunkBlockId}
                     />
                   )}
                 </div>

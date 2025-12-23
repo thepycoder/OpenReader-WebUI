@@ -488,8 +488,23 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                                 <span className="text-sm font-medium text-foreground">Enable filtering</span>
                               </label>
                               {documentFilters.enabled && (
-                                <div className="pl-6 space-y-1.5">
-                                  {(['header', 'footer', 'image', 'caption', 'figure', 'table'] as const).map((type) => (
+                                <div className="pl-6 space-y-1.5 grid grid-cols-2 gap-x-4">
+                                  {([
+                                    { type: 'page-header', label: 'Page Header' },
+                                    { type: 'page-footer', label: 'Page Footer' },
+                                    { type: 'title', label: 'Title' },
+                                    { type: 'section-header', label: 'Section Header' },
+                                    { type: 'image', label: 'Image' },
+                                    { type: 'figure', label: 'Figure' },
+                                    { type: 'picture', label: 'Picture' },
+                                    { type: 'table', label: 'Table' },
+                                    { type: 'table-fallback', label: 'Table Fallback' },
+                                    { type: 'caption', label: 'Caption' },
+                                    { type: 'list-item', label: 'List Item' },
+                                    { type: 'footnote', label: 'Footnote' },
+                                    { type: 'formula', label: 'Formula' },
+                                    { type: 'code', label: 'Code' },
+                                  ] as const).map(({ type, label }) => (
                                     <label key={type} className="flex items-center space-x-2">
                                       <input
                                         type="checkbox"
@@ -506,7 +521,7 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                                         }}
                                         className="form-checkbox h-4 w-4 text-accent rounded border-muted"
                                       />
-                                      <span className="text-sm text-foreground capitalize">{type}</span>
+                                      <span className="text-sm text-foreground">{label}</span>
                                     </label>
                                   ))}
                                 </div>
