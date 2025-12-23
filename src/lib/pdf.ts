@@ -4,6 +4,10 @@ import { type PDFDocumentProxy, TextLayer } from 'pdfjs-dist';
 import "core-js/proposals/promise-with-resolvers";
 import type { TTSSentenceAlignment } from '@/types/tts';
 import { CmpStr } from 'cmpstr';
+import type { PDFStructure, PDFElementFilter, PDFBlock } from '@/types/pdfStructure';
+import { getPdfStructure, getPdfFilter } from './dexie';
+import { getAppConfig } from './dexie';
+import { preprocessSentenceForAudio } from './nlp';
 
 const cmp = CmpStr.create().setMetric('dice').setFlags('itw');
 
@@ -276,8 +280,190 @@ export async function extractTextFromPDF(
   }
 }
 
+// Structure-based text extraction functions
+
+/**
+ * Get the next N blocks in reading order starting from a given block ID
+ */
+export function getNextBlocksByReadingOrder(
+  structure: PDFStructure,
+  currentBlockId: string,
+  count: number
+): string[] {
+  const globalOrder = structure.globalReadingOrder;
+  const currentIndex = globalOrder.indexOf(currentBlockId);
+  
+  if (currentIndex === -1) {
+    // Current block not found, return first N blocks
+    return globalOrder.slice(0, count);
+  }
+  
+  return globalOrder.slice(currentIndex + 1, currentIndex + 1 + count);
+}
+
+/**
+ * Extract text from specific blocks by their IDs
+ */
+export function extractTextFromBlocks(
+  structure: PDFStructure,
+  blockIds: string[]
+): string {
+  const blockMap = new Map<string, PDFBlock>();
+  
+  // Build a map of all blocks
+  for (const page of structure.pages) {
+    for (const block of page.blocks) {
+      blockMap.set(block.id, block);
+    }
+  }
+  
+  // Extract text from blocks in order
+  const texts: string[] = [];
+  for (const blockId of blockIds) {
+    const block = blockMap.get(blockId);
+    if (block && block.text.trim()) {
+      texts.push(preprocessSentenceForAudio(block.text));
+    }
+  }
+  
+  return texts.join(' ');
+}
+
+/**
+ * Extract text from PDF using structure data, filters, and reading order
+ */
+export async function extractTextFromPDFWithStructure(
+  documentId: string,
+  pdf: PDFDocumentProxy,
+  pageNumber: number,
+  margins = { header: 0.07, footer: 0.07, left: 0.07, right: 0.07 }
+): Promise<string> {
+  try {
+    // Try to get structure data
+    const structureRow = await getPdfStructure(documentId);
+    
+    if (!structureRow || !structureRow.structure) {
+      // Fallback to original extraction
+      return extractTextFromPDF(pdf, pageNumber, margins);
+    }
+    
+    const structure = structureRow.structure;
+    
+    // Get filter settings (merge global + per-document)
+    const appConfig = await getAppConfig();
+    const globalFilter = appConfig?.pdfElementFilters || {
+      enabled: false,
+      excludedTypes: [],
+      excludedBboxes: [],
+    };
+    
+    const documentFilterRow = await getPdfFilter(documentId);
+    const useGlobalFilter = documentFilterRow?.useGlobal !== false;
+    const activeFilter: PDFElementFilter = useGlobalFilter
+      ? globalFilter
+      : documentFilterRow?.filter || globalFilter;
+    
+    // Find blocks for this page
+    const pageData = structure.pages.find(p => p.pageNumber === pageNumber);
+    if (!pageData) {
+      // Fallback if page not found in structure
+      return extractTextFromPDF(pdf, pageNumber, margins);
+    }
+    
+    // Filter blocks
+    let filteredBlocks = pageData.blocks;
+    
+    if (activeFilter.enabled) {
+      filteredBlocks = filteredBlocks.filter(block => {
+        // Exclude by type
+        if (activeFilter.excludedTypes.includes(block.type)) {
+          return false;
+        }
+        
+        // Exclude by specific block IDs
+        if (activeFilter.excludedBboxes?.includes(block.id)) {
+          return false;
+        }
+        
+        return true;
+      });
+    }
+    
+    // Sort by reading order
+    filteredBlocks.sort((a, b) => a.readingOrder - b.readingOrder);
+    
+    // Extract text from filtered blocks
+    const texts = filteredBlocks
+      .filter(block => block.text.trim())
+      .map(block => preprocessSentenceForAudio(block.text));
+    
+    return texts.join(' ');
+  } catch (error) {
+    console.error('Error extracting text with structure:', error);
+    // Fallback to original extraction
+    return extractTextFromPDF(pdf, pageNumber, margins);
+  }
+}
+
+/**
+ * Extract text for a range of blocks using global reading order (for prefetching)
+ */
+export async function extractTextFromBlocksByReadingOrder(
+  documentId: string,
+  blockIds: string[]
+): Promise<string> {
+  try {
+    const structureRow = await getPdfStructure(documentId);
+    if (!structureRow || !structureRow.structure) {
+      return '';
+    }
+    
+    // Get filter settings
+    const appConfig = await getAppConfig();
+    const globalFilter = appConfig?.pdfElementFilters || {
+      enabled: false,
+      excludedTypes: [],
+      excludedBboxes: [],
+    };
+    
+    const documentFilterRow = await getPdfFilter(documentId);
+    const useGlobalFilter = documentFilterRow?.useGlobal !== false;
+    const activeFilter: PDFElementFilter = useGlobalFilter
+      ? globalFilter
+      : documentFilterRow?.filter || globalFilter;
+    
+    // Build block map
+    const blockMap = new Map<string, PDFBlock>();
+    for (const page of structureRow.structure.pages) {
+      for (const block of page.blocks) {
+        blockMap.set(block.id, block);
+      }
+    }
+    
+    // Filter and extract text
+    const texts: string[] = [];
+    for (const blockId of blockIds) {
+      const block = blockMap.get(blockId);
+      if (!block || !block.text.trim()) continue;
+      
+      // Apply filters
+      if (activeFilter.enabled) {
+        if (activeFilter.excludedTypes.includes(block.type)) continue;
+        if (activeFilter.excludedBboxes?.includes(block.id)) continue;
+      }
+      
+      texts.push(preprocessSentenceForAudio(block.text));
+    }
+    
+    return texts.join(' ');
+  } catch (error) {
+    console.error('Error extracting text from blocks:', error);
+    return '';
+  }
+}
+
 // Highlighting functions
-export function clearHighlights() {
+export function clearSentenceHighlights() {
   const textNodes = document.querySelectorAll('.react-pdf__Page__textContent span');
   textNodes.forEach((node) => {
     const element = node as HTMLElement;
@@ -292,13 +478,11 @@ export function clearHighlights() {
       element.parentElement.removeChild(element);
     }
   });
-  const wordOverlays = document.querySelectorAll('.pdf-word-highlight-overlay');
-  wordOverlays.forEach((node) => {
-    const element = node as HTMLElement;
-    if (element.parentElement) {
-      element.parentElement.removeChild(element);
-    }
-  });
+}
+
+export function clearHighlights() {
+  clearSentenceHighlights();
+  clearWordHighlights();
 }
 
 export function clearWordHighlights() {
@@ -316,7 +500,7 @@ export function highlightPattern(
   pattern: string,
   containerRef: React.RefObject<HTMLDivElement>
 ) {
-  clearHighlights();
+  clearSentenceHighlights();
 
   if (!pattern?.trim()) return;
   const container = containerRef.current;

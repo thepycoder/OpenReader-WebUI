@@ -34,11 +34,16 @@ import { processTextToSentences } from '@/lib/nlp';
 import { withRetry, getAudiobookStatus, generateTTS, createAudiobookChapter } from '@/lib/client';
 import {
   extractTextFromPDF,
+  extractTextFromPDFWithStructure,
+  extractTextFromBlocksByReadingOrder,
+  getNextBlocksByReadingOrder,
   highlightPattern,
   clearHighlights,
   clearWordHighlights,
   highlightWordIndex,
 } from '@/lib/pdf';
+import { getPdfStructure } from '@/lib/dexie';
+import type { PDFStructure } from '@/types/pdfStructure';
 
 import type {
   TTSSentenceAlignment,
@@ -124,11 +129,14 @@ export function PDFProvider({ children }: { children: ReactNode }) {
   // Current document state
   const [currDocData, setCurrDocData] = useState<ArrayBuffer>();
   const [currDocName, setCurrDocName] = useState<string>();
+  const [currDocId, setCurrDocId] = useState<string>();
   const [currDocText, setCurrDocText] = useState<string>();
   const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy>();
   const [isAudioCombining] = useState(false);
   const pageTextCacheRef = useRef<Map<number, string>>(new Map());
   const [currDocPage, setCurrDocPage] = useState<number>(currDocPageNumber);
+  const prefetchCacheRef = useRef<Map<string, string>>(new Map());
+  const currentBlockIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     setCurrDocPage(currDocPageNumber);
@@ -148,12 +156,13 @@ export function PDFProvider({ children }: { children: ReactNode }) {
   /**
    * Loads and processes text from the current document page
    * Extracts text from the PDF and updates both document text and TTS text states
+   * Includes prefetching logic for next blocks in reading order
    * 
    * @returns {Promise<void>}
    */
   const loadCurrDocText = useCallback(async () => {
     try {
-      if (!pdfDocument) return;
+      if (!pdfDocument || !currDocName) return;
 
       const margins = {
         header: headerMargin,
@@ -161,6 +170,9 @@ export function PDFProvider({ children }: { children: ReactNode }) {
         left: leftMargin,
         right: rightMargin
       };
+
+      // Get document ID
+      const docId = currDocId;
 
       const getPageText = async (pageNumber: number, shouldCache = false): Promise<string> => {
         if (pageTextCacheRef.current.has(pageNumber)) {
@@ -171,7 +183,50 @@ export function PDFProvider({ children }: { children: ReactNode }) {
           return cached;
         }
 
-        const extracted = await extractTextFromPDF(pdfDocument, pageNumber, margins);
+        // Try structure-based extraction first
+        let extracted: string;
+        if (docId) {
+          try {
+            extracted = await extractTextFromPDFWithStructure(docId, pdfDocument, pageNumber, margins);
+            
+            // Update current block ID for prefetching
+            const structureRow = await getPdfStructure(docId);
+          if (structureRow?.structure) {
+            const pageData = structureRow.structure.pages.find(p => p.pageNumber === pageNumber);
+            if (pageData && pageData.blocks.length > 0) {
+              // Use first block as current position (could be improved)
+              const firstBlock = pageData.blocks[0];
+              currentBlockIdRef.current = firstBlock.id;
+              
+              // Prefetch next blocks in background
+              const nextBlockIds = getNextBlocksByReadingOrder(
+                structureRow.structure,
+                firstBlock.id,
+                10 // Prefetch 10 blocks ahead
+              );
+              
+              // Prefetch in background (don't await)
+              extractTextFromBlocksByReadingOrder(docId, nextBlockIds).then(prefetchedText => {
+                // Cache prefetched text by block IDs
+                nextBlockIds.forEach((blockId, index) => {
+                  // Store partial text for each block (simplified)
+                  if (prefetchedText) {
+                    prefetchCacheRef.current.set(blockId, prefetchedText);
+                  }
+                });
+              }).catch(console.error);
+            }
+          }
+          } catch (error) {
+            // Fallback to original extraction
+            console.warn('Structure-based extraction failed, using fallback:', error);
+            extracted = await extractTextFromPDF(pdfDocument, pageNumber, margins);
+          }
+        } else {
+          // No document ID, use original extraction
+          extracted = await extractTextFromPDF(pdfDocument, pageNumber, margins);
+        }
+        
         if (shouldCache) {
           pageTextCacheRef.current.set(pageNumber, extracted);
         }
@@ -207,6 +262,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     footerMargin,
     leftMargin,
     rightMargin,
+    currDocId,
   ]);
 
   /**
@@ -230,6 +286,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
     try {
       const doc = await getPdfDocument(id);
       if (doc) {
+        setCurrDocId(id);
         setCurrDocName(doc.name);
         setCurrDocData(doc.data);
       }
@@ -243,12 +300,15 @@ export function PDFProvider({ children }: { children: ReactNode }) {
    * Resets all document-related states and stops any ongoing TTS playback
    */
   const clearCurrDoc = useCallback(() => {
+    setCurrDocId(undefined);
     setCurrDocName(undefined);
     setCurrDocData(undefined);
     setCurrDocText(undefined);
     setCurrDocPages(undefined);
     setPdfDocument(undefined);
     pageTextCacheRef.current.clear();
+    prefetchCacheRef.current.clear();
+    currentBlockIdRef.current = null;
     stop();
   }, [setCurrDocPages, stop]);
 
@@ -275,13 +335,48 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       const textPerPage: string[] = [];
       let totalLength = 0;
       
-      for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
-        const rawText = await extractTextFromPDF(pdfDocument, pageNum, {
-          header: headerMargin,
-          footer: footerMargin,
-          left: leftMargin,
-          right: rightMargin
-        });
+      // Get document ID
+      const docId = currDocId;
+      if (!docId) {
+        // Fallback to original extraction - process all pages
+        for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
+          const rawText = await extractTextFromPDF(pdfDocument, pageNum, {
+            header: headerMargin,
+            footer: footerMargin,
+            left: leftMargin,
+            right: rightMargin
+          });
+          const trimmedText = rawText.trim();
+          if (trimmedText) {
+            const processedText = smartSentenceSplitting
+              ? processTextToSentences(trimmedText).join(' ')
+              : trimmedText;
+
+            textPerPage.push(processedText);
+            totalLength += processedText.length;
+          }
+        }
+      } else {
+        // Use structure-based extraction
+        for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
+        let rawText: string;
+        try {
+          // Try structure-based extraction
+          rawText = await extractTextFromPDFWithStructure(docId, pdfDocument, pageNum, {
+            header: headerMargin,
+            footer: footerMargin,
+            left: leftMargin,
+            right: rightMargin
+          });
+        } catch (error) {
+          // Fallback to original extraction
+          rawText = await extractTextFromPDF(pdfDocument, pageNum, {
+            header: headerMargin,
+            footer: footerMargin,
+            left: leftMargin,
+            right: rightMargin
+          });
+        }
         const trimmedText = rawText.trim();
         if (trimmedText) {
           const processedText = smartSentenceSplitting
@@ -290,6 +385,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
 
           textPerPage.push(processedText);
           totalLength += processedText.length;
+        }
         }
       }
 
@@ -438,7 +534,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       console.error('Error creating audiobook:', error);
       throw error;
     }
-  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting]);
+  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting, currDocId, processTextToSentences]);
 
   /**
    * Regenerates a specific chapter (page) of the PDF audiobook
@@ -457,13 +553,33 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       // IMPORTANT: Chapter indices are based on non-empty pages used during generation.
       // Build a mapping of "chapterIndex" -> actual PDF page number (1-based).
       const nonEmptyPages: number[] = [];
+      const docId = currDocId;
       for (let page = 1; page <= pdfDocument.numPages; page++) {
-        const pageText = await extractTextFromPDF(pdfDocument, page, {
-          header: headerMargin,
-          footer: footerMargin,
-          left: leftMargin,
-          right: rightMargin
-        });
+        let pageText: string;
+        if (docId) {
+          try {
+            pageText = await extractTextFromPDFWithStructure(docId, pdfDocument, page, {
+              header: headerMargin,
+              footer: footerMargin,
+              left: leftMargin,
+              right: rightMargin
+            });
+          } catch (error) {
+            pageText = await extractTextFromPDF(pdfDocument, page, {
+              header: headerMargin,
+              footer: footerMargin,
+              left: leftMargin,
+              right: rightMargin
+            });
+          }
+        } else {
+          pageText = await extractTextFromPDF(pdfDocument, page, {
+            header: headerMargin,
+            footer: footerMargin,
+            left: leftMargin,
+            right: rightMargin
+          });
+        }
         if (pageText.trim()) {
           nonEmptyPages.push(page);
         }
@@ -476,12 +592,34 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       const pageNum = nonEmptyPages[chapterIndex];
 
       // Extract text from the mapped page
-      const rawText = await extractTextFromPDF(pdfDocument, pageNum, {
-        header: headerMargin,
-        footer: footerMargin,
-        left: leftMargin,
-        right: rightMargin
-      });
+      let rawText: string;
+      
+      if (docId) {
+        try {
+          rawText = await extractTextFromPDFWithStructure(docId, pdfDocument, pageNum, {
+            header: headerMargin,
+            footer: footerMargin,
+            left: leftMargin,
+            right: rightMargin
+          });
+        } catch (error) {
+          // Fallback to original extraction
+          rawText = await extractTextFromPDF(pdfDocument, pageNum, {
+            header: headerMargin,
+            footer: footerMargin,
+            left: leftMargin,
+            right: rightMargin
+          });
+        }
+      } else {
+        // Fallback to original extraction
+        rawText = await extractTextFromPDF(pdfDocument, pageNum, {
+          header: headerMargin,
+          footer: footerMargin,
+          left: leftMargin,
+          right: rightMargin
+        });
+      }
 
       const trimmedText = rawText.trim();
       if (!trimmedText) {
@@ -552,7 +690,7 @@ export function PDFProvider({ children }: { children: ReactNode }) {
       console.error('Error regenerating page:', error);
       throw error;
     }
-  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting]);
+  }, [pdfDocument, headerMargin, footerMargin, leftMargin, rightMargin, apiKey, baseUrl, voice, voiceSpeed, ttsProvider, ttsModel, ttsInstructions, smartSentenceSplitting, currDocId, processTextToSentences]);
 
   /**
    * Effect hook to initialize TTS as non-EPUB mode

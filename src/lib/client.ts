@@ -191,13 +191,14 @@ export const generateTTS = async (
 
 
 
-export const alignAudio = async (payload: AlignmentPayload): Promise<AlignmentResponse | null> => {
+export const alignAudio = async (text: string, audio: Blob): Promise<AlignmentResponse | null> => {
+  const formData = new FormData();
+  formData.append('text', text);
+  formData.append('audio', audio);
+
   const response = await fetch('/api/whisper', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
+    body: formData,
   });
 
   if (!response.ok) return null;

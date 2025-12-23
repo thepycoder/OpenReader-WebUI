@@ -1,4 +1,5 @@
 import type { DocumentListState } from '@/types/documents';
+import type { PDFElementFilter } from '@/types/pdfStructure';
 
 const isDev = process.env.NEXT_PUBLIC_NODE_ENV !== 'production' || process.env.NODE_ENV == null;
 
@@ -30,6 +31,7 @@ export interface AppConfigValues {
   epubWordHighlightEnabled: boolean;
   firstVisit: boolean;
   documentListState: DocumentListState;
+  pdfElementFilters: PDFElementFilter;
 }
 
 export const APP_CONFIG_DEFAULTS: AppConfigValues = {
@@ -62,6 +64,11 @@ export const APP_CONFIG_DEFAULTS: AppConfigValues = {
     collapsedFolders: [],
     showHint: true,
     viewMode: 'grid',
+  },
+  pdfElementFilters: {
+    enabled: false,
+    excludedTypes: [],
+    excludedBboxes: [],
   },
 };
 

@@ -1,0 +1,72 @@
+services:
+  kokoro-tts:
+    container_name: kokoro-tts
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4
+    environment:
+      # ONNX Optimization Settings for vectorized operations
+      - ONNX_NUM_THREADS=8  # Maximize core usage for vectorized ops
+      - ONNX_INTER_OP_THREADS=4  # Higher inter-op for parallel matrix operations
+      - ONNX_EXECUTION_MODE=parallel
+      - ONNX_OPTIMIZATION_LEVEL=all
+      - ONNX_MEMORY_PATTERN=true
+      - ONNX_ARENA_EXTEND_STRATEGY=kNextPowerOfTwo
+      - API_LOG_LEVEL=DEBUG
+    restart: unless-stopped
+    networks:
+      - openreader-network
+    # Uncomment the following lines if you want to use GPU version instead:
+    # image: ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.4
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # environment:
+    #   - USE_GPU=true
+    #   - PYTHONUNBUFFERED=1
+    #   - API_LOG_LEVEL=DEBUG
+
+  pymupdf-api:
+    container_name: pymupdf-api
+    build:
+      context: ./services/pymupdf-api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - openreader-network
+
+  openreader-webui:
+    container_name: openreader-webui
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # TTS API Configuration
+      - API_BASE=http://kokoro-tts:8880/v1
+      - API_KEY=none  # Set to your API key if using cloud providers
+      # PyMuPDF API Configuration
+      - PYMUPDF_API_URL=http://pymupdf-api:8000
+      # Whisper.cpp configuration (optional, for word-by-word highlighting)
+      # - WHISPER_CPP_BIN=/opt/whisper.cpp/build/bin/whisper-cli
+    ports:
+      - "3003:3003"
+    volumes:
+      - docstore:/app/docstore
+    depends_on:
+      - kokoro-tts
+      - pymupdf-api
+    restart: unless-stopped
+    networks:
+      - openreader-network
+
+networks:
+  openreader-network:
+    driver: bridge
+
+volumes:
+  docstore:
+

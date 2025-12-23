@@ -41,7 +41,7 @@ export function SettingsModal() {
   const [isOpen, setIsOpen] = useState(false);
 
   const { theme, setTheme } = useTheme();
-  const { apiKey, baseUrl, ttsProvider, ttsModel, ttsInstructions, updateConfig, updateConfigKey } = useConfig();
+  const { apiKey, baseUrl, ttsProvider, ttsModel, ttsInstructions, updateConfig, updateConfigKey, pdfElementFilters } = useConfig();
   const { clearPDFs, clearEPUBs, clearHTML } = useDocuments();
   const [localApiKey, setLocalApiKey] = useState(apiKey);
   const [localBaseUrl, setLocalBaseUrl] = useState(baseUrl);
@@ -594,6 +594,52 @@ export function SettingsModal() {
                               </ListboxOptions>
                             </Transition>
                           </Listbox>
+                        </div>
+                        
+                        <div className="space-y-3 pt-2 border-t border-muted">
+                          <label className="block text-sm font-medium text-foreground">PDF Element Filters</label>
+                          <p className="text-xs text-muted mb-2">
+                            Exclude specific element types from TTS reading (headers, footers, images, etc.)
+                          </p>
+                          <div className="space-y-2">
+                            <label className="flex items-center space-x-2">
+                              <input
+                                type="checkbox"
+                                checked={pdfElementFilters.enabled}
+                                onChange={(e) => {
+                                  updateConfigKey('pdfElementFilters', {
+                                    ...pdfElementFilters,
+                                    enabled: e.target.checked,
+                                  });
+                                }}
+                                className="form-checkbox h-4 w-4 text-accent rounded border-muted"
+                              />
+                              <span className="text-sm font-medium text-foreground">Enable filtering</span>
+                            </label>
+                            {pdfElementFilters.enabled && (
+                              <div className="pl-6 space-y-1.5">
+                                {(['header', 'footer', 'image', 'caption', 'figure', 'table'] as const).map((type) => (
+                                  <label key={type} className="flex items-center space-x-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={pdfElementFilters.excludedTypes.includes(type)}
+                                      onChange={(e) => {
+                                        const newExcludedTypes = e.target.checked
+                                          ? [...pdfElementFilters.excludedTypes, type]
+                                          : pdfElementFilters.excludedTypes.filter(t => t !== type);
+                                        updateConfigKey('pdfElementFilters', {
+                                          ...pdfElementFilters,
+                                          excludedTypes: newExcludedTypes,
+                                        });
+                                      }}
+                                      className="form-checkbox h-4 w-4 text-accent rounded border-muted"
+                                    />
+                                    <span className="text-sm text-foreground capitalize">{type}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </TabPanel>
 

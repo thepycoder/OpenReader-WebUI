@@ -1,10 +1,11 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { APP_CONFIG_DEFAULTS, type ViewType, type SavedVoices, type AppConfigRow } from '@/types/config';
 import { PDFDocument, EPUBDocument, HTMLDocument, DocumentListState, SyncedDocument } from '@/types/documents';
+import type { PDFStructureRow, PDFFilterRow } from '@/types/pdfStructure';
 
 const DB_NAME = 'openreader-db';
 // Managed via Dexie (version bumped from the original manual IndexedDB)
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 const PDF_TABLE = 'pdf-documents' as const;
 const EPUB_TABLE = 'epub-documents' as const;
@@ -12,6 +13,8 @@ const HTML_TABLE = 'html-documents' as const;
 const CONFIG_TABLE = 'config' as const;
 const APP_CONFIG_TABLE = 'app-config' as const;
 const LAST_LOCATION_TABLE = 'last-locations' as const;
+const PDF_STRUCTURE_TABLE = 'pdf-structure' as const;
+const PDF_FILTERS_TABLE = 'pdf-filters' as const;
 
 export interface LastLocationRow {
   docId: string;
@@ -30,6 +33,8 @@ type OpenReaderDB = Dexie & {
   [CONFIG_TABLE]: EntityTable<ConfigRow, 'key'>;
   [APP_CONFIG_TABLE]: EntityTable<AppConfigRow, 'id'>;
   [LAST_LOCATION_TABLE]: EntityTable<LastLocationRow, 'docId'>;
+  [PDF_STRUCTURE_TABLE]: EntityTable<PDFStructureRow, 'documentId'>;
+  [PDF_FILTERS_TABLE]: EntityTable<PDFFilterRow, 'documentId'>;
 };
 
 export const db = new Dexie(DB_NAME) as OpenReaderDB;
@@ -107,6 +112,15 @@ function buildAppConfigFromRaw(raw: RawConfigMap): AppConfigRow {
     }
   }
 
+  let pdfElementFilters = APP_CONFIG_DEFAULTS.pdfElementFilters;
+  if (raw.pdfElementFilters) {
+    try {
+      pdfElementFilters = JSON.parse(raw.pdfElementFilters) as typeof APP_CONFIG_DEFAULTS.pdfElementFilters;
+    } catch (error) {
+      console.error('Error parsing pdfElementFilters during migration:', error);
+    }
+  }
+
   const config: AppConfigRow = {
     id: 'singleton',
     ...APP_CONFIG_DEFAULTS,
@@ -144,6 +158,7 @@ function buildAppConfigFromRaw(raw: RawConfigMap): AppConfigRow {
       raw.epubWordHighlightEnabled === 'false' ? false : APP_CONFIG_DEFAULTS.epubWordHighlightEnabled,
     firstVisit: raw.firstVisit === 'true',
     documentListState,
+    pdfElementFilters,
   };
 
   const voiceKey = `${config.ttsProvider}:${config.ttsModel}`;
@@ -154,7 +169,7 @@ function buildAppConfigFromRaw(raw: RawConfigMap): AppConfigRow {
 
 // Version 5: introduce app-config and last-locations tables, migrate scattered config keys,
 // and drop the legacy config table in a single upgrade step.
-db.version(DB_VERSION).stores({
+db.version(5).stores({
   [PDF_TABLE]: 'id, type, name, lastModified, size, folderId',
   [EPUB_TABLE]: 'id, type, name, lastModified, size, folderId',
   [HTML_TABLE]: 'id, type, name, lastModified, size, folderId',
@@ -187,6 +202,18 @@ db.version(DB_VERSION).stores({
       await locationTable.put({ docId, location: row.value });
     }
   }
+});
+
+// Version 6: add PDF structure and filter tables
+db.version(DB_VERSION).stores({
+  [PDF_TABLE]: 'id, type, name, lastModified, size, folderId',
+  [EPUB_TABLE]: 'id, type, name, lastModified, size, folderId',
+  [HTML_TABLE]: 'id, type, name, lastModified, size, folderId',
+  [APP_CONFIG_TABLE]: 'id',
+  [LAST_LOCATION_TABLE]: 'docId',
+  [PDF_STRUCTURE_TABLE]: 'documentId',
+  [PDF_FILTERS_TABLE]: 'documentId',
+  [CONFIG_TABLE]: null,
 });
 
 let dbOpenPromise: Promise<void> | null = null;
@@ -242,9 +269,11 @@ export async function getAllPdfDocuments(): Promise<PDFDocument[]> {
 export async function removePdfDocument(id: string): Promise<void> {
   await withDB(async () => {
     console.log('Removing PDF document via Dexie:', id);
-    await db.transaction('readwrite', db[PDF_TABLE], db[LAST_LOCATION_TABLE], async () => {
+    await db.transaction('readwrite', db[PDF_TABLE], db[LAST_LOCATION_TABLE], db[PDF_STRUCTURE_TABLE], db[PDF_FILTERS_TABLE], async () => {
       await db[PDF_TABLE].delete(id);
       await db[LAST_LOCATION_TABLE].delete(id);
+      await db[PDF_STRUCTURE_TABLE].delete(id);
+      await db[PDF_FILTERS_TABLE].delete(id);
     });
   });
 }
@@ -554,4 +583,60 @@ export async function loadDocumentsFromServer(
   }
 
   return { lastSync: Date.now() };
+}
+
+// PDF structure helpers
+
+export async function savePdfStructure(documentId: string, structure: PDFStructureRow['structure']): Promise<void> {
+  await withDB(async () => {
+    console.log('Saving PDF structure via Dexie:', documentId);
+    await db[PDF_STRUCTURE_TABLE].put({
+      documentId,
+      structure,
+      analyzedAt: Date.now(),
+    });
+  });
+}
+
+export async function getPdfStructure(documentId: string): Promise<PDFStructureRow | undefined> {
+  return withDB(async () => {
+    console.log('Fetching PDF structure via Dexie:', documentId);
+    return db[PDF_STRUCTURE_TABLE].get(documentId);
+  });
+}
+
+export async function removePdfStructure(documentId: string): Promise<void> {
+  await withDB(async () => {
+    console.log('Removing PDF structure via Dexie:', documentId);
+    await db[PDF_STRUCTURE_TABLE].delete(documentId);
+  });
+}
+
+// PDF filter helpers
+
+export async function savePdfFilter(documentId: string, filter: PDFFilterRow['filter'], useGlobal: boolean, showBoundingBoxes?: boolean): Promise<void> {
+  await withDB(async () => {
+    console.log('Saving PDF filter via Dexie:', documentId);
+    const existing = await db[PDF_FILTERS_TABLE].get(documentId);
+    await db[PDF_FILTERS_TABLE].put({
+      documentId,
+      filter,
+      useGlobal,
+      showBoundingBoxes: showBoundingBoxes ?? existing?.showBoundingBoxes ?? false,
+    });
+  });
+}
+
+export async function getPdfFilter(documentId: string): Promise<PDFFilterRow | undefined> {
+  return withDB(async () => {
+    console.log('Fetching PDF filter via Dexie:', documentId);
+    return db[PDF_FILTERS_TABLE].get(documentId);
+  });
+}
+
+export async function removePdfFilter(documentId: string): Promise<void> {
+  await withDB(async () => {
+    console.log('Removing PDF filter via Dexie:', documentId);
+    await db[PDF_FILTERS_TABLE].delete(documentId);
+  });
 }

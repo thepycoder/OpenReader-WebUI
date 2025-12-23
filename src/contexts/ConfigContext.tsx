@@ -35,6 +35,7 @@ interface ConfigContextType {
   pdfWordHighlightEnabled: boolean;
   epubHighlightEnabled: boolean;
   epubWordHighlightEnabled: boolean;
+  pdfElementFilters: import('@/types/pdfStructure').PDFElementFilter;
 }
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
@@ -108,6 +109,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     pdfWordHighlightEnabled,
     epubHighlightEnabled,
     epubWordHighlightEnabled,
+    pdfElementFilters,
   } = config || APP_CONFIG_DEFAULTS;
 
   /**
@@ -207,7 +209,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       pdfHighlightEnabled,
       pdfWordHighlightEnabled,
       epubHighlightEnabled,
-      epubWordHighlightEnabled
+      epubWordHighlightEnabled,
+      pdfElementFilters
     }}>
       {children}
     </ConfigContext.Provider>

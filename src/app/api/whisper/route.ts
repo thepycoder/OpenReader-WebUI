@@ -401,13 +401,13 @@ async function alignAudioWithText(
   }
 }
 
-function makeCacheKey(input: WhisperRequestBody) {
+function makeCacheKey(text: string, audioLen: number, lang?: string) {
   const hash = createHash('sha256')
     .update(
       JSON.stringify({
-        text: input.text,
-        lang: input.lang || '',
-        audioLen: input.audio?.length || 0,
+        text,
+        lang: lang || '',
+        audioLen,
       })
     )
     .digest('hex');
@@ -416,18 +416,46 @@ function makeCacheKey(input: WhisperRequestBody) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as WhisperRequestBody;
-    const { text, audio, lang } = body;
+    let text: string;
+    let audioBuffer: ArrayBuffer;
+    let lang: string | undefined;
 
-    if (!text || !audio || !Array.isArray(audio)) {
+    const contentType = req.headers.get('content-type') || '';
+    if (contentType.includes('multipart/form-data')) {
+      const formData = await req.formData();
+      text = formData.get('text') as string;
+      const audioFile = formData.get('audio') as Blob;
+      lang = (formData.get('lang') as string) || undefined;
+
+      if (!text || !audioFile) {
+        return NextResponse.json(
+          { error: 'Missing text or audio in form data' },
+          { status: 400 }
+        );
+      }
+      audioBuffer = await audioFile.arrayBuffer();
+    } else {
+      const body = (await req.json()) as WhisperRequestBody;
+      text = body.text;
+      if (body.audio && Array.isArray(body.audio)) {
+        audioBuffer = new Uint8Array(body.audio).buffer;
+      } else {
+        return NextResponse.json(
+          { error: 'Missing text or audio in request body' },
+          { status: 400 }
+        );
+      }
+      lang = body.lang;
+    }
+
+    if (!text || !audioBuffer) {
       return NextResponse.json(
-        { error: 'Missing text or audio in request body' },
+        { error: 'Missing text or audio' },
         { status: 400 }
       );
     }
 
-    const cacheKey = makeCacheKey(body);
-    const audioBuffer = new Uint8Array(audio).buffer;
+    const cacheKey = makeCacheKey(text, audioBuffer.byteLength, lang);
 
     const alignments: TTSSentenceAlignment[] = await alignAudioWithText(
       audioBuffer,

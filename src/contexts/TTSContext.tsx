@@ -771,13 +771,9 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
       if (sentenceAlignmentCacheRef.current.has(alignmentKey)) return;
 
       try {
-        const audioBytes = Array.from(new Uint8Array(arrayBuffer));
-        const alignmentBody = {
-          text: sentence,
-          audio: audioBytes,
-        };
-
-        void alignAudio(alignmentBody)
+        const audioBlob = new Blob([arrayBuffer]);
+        
+        void alignAudio(sentence, audioBlob)
           .then(async (data) => {
             if (!data || !Array.isArray(data.alignments) || !data.alignments[0]) {
               return;
@@ -931,10 +927,18 @@ export function TTSProvider({ children }: { children: ReactNode }): ReactElement
         const audioBuffer = await getAudio(sentence);
         if (!audioBuffer) throw new Error('No audio data generated');
 
-        // Convert to base64 data URI
+        // Convert to base64 data URI using chunked approach to avoid stack overflow and blocking
         const bytes = new Uint8Array(audioBuffer);
-        const binaryString = bytes.reduce((acc, byte) => acc + String.fromCharCode(byte), '');
-        const base64String = btoa(binaryString);
+        let binary = '';
+        const len = bytes.byteLength;
+        const CHUNK_SIZE = 0x8000; // 32KB chunks
+        
+        for (let i = 0; i < len; i += CHUNK_SIZE) {
+          const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, len));
+          binary += String.fromCharCode.apply(null, Array.from(chunk));
+        }
+        
+        const base64String = btoa(binary);
         return `data:audio/mp3;base64,${base64String}`;
       } catch (error) {
         setIsProcessing(false);

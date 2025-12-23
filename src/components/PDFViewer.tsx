@@ -10,6 +10,10 @@ import { useTTS } from '@/contexts/TTSContext';
 import { usePDF } from '@/contexts/PDFContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { usePDFResize } from '@/hooks/pdf/usePDFResize';
+import { PDFBoundingBoxOverlay } from '@/components/PDFBoundingBoxOverlay';
+import { useParams } from 'next/navigation';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '@/lib/dexie';
 
 interface PDFViewerProps {
   zoomLevel: number;
@@ -24,9 +28,23 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scaleRef = useRef<number>(1);
   const { containerWidth } = usePDFResize(containerRef);
+  const { id } = useParams();
 
   // Config context
   const { viewType, pdfHighlightEnabled, pdfWordHighlightEnabled } = useConfig();
+  
+  // Load bounding boxes setting and structure using live queries
+  const filterRow = useLiveQuery(
+    () => id ? db['pdf-filters'].get(id as string) : undefined,
+    [id]
+  );
+  const structureRow = useLiveQuery(
+    () => id ? db['pdf-structure'].get(id as string) : undefined,
+    [id]
+  );
+  
+  const showBoundingBoxes = filterRow?.showBoundingBoxes || false;
+  const pdfStructure = structureRow?.structure || null;
 
   // TTS context
   const {
@@ -66,14 +84,11 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
       return;
     }
 
-    const highlightTimeout = setTimeout(() => {
-      if (containerRef.current) {
-        highlightPattern(currDocText, currentSentence || '', containerRef as RefObject<HTMLDivElement>);
-      }
-    }, 200);
+    if (containerRef.current) {
+      highlightPattern(currDocText, currentSentence || '', containerRef as RefObject<HTMLDivElement>);
+    }
 
     return () => {
-      clearTimeout(highlightTimeout);
       clearHighlights();
     };
   }, [currDocText, currentSentence, highlightPattern, clearHighlights, pdfHighlightEnabled]);
@@ -189,50 +204,83 @@ export function PDFViewer({ zoomLevel }: PDFViewerProps) {
             // Scroll mode: render all pages
             <div className="flex flex-col gap-4">
               {currDocPages && [...Array(currDocPages)].map((_, i) => (
-                <Page
-                  key={`page_${i + 1}`}
-                  pageNumber={i + 1}
-                  renderAnnotationLayer={true}
-                  renderTextLayer={i + 1 === currDocPage}
-                  className="shadow-lg"
-                  scale={currentScale()}
-                  onLoadSuccess={(page) => {
-                    setPageWidth(page.originalWidth);
-                    setPageHeight(page.originalHeight);
-                  }}
-                />
+                <div key={`page_wrapper_${i + 1}`} style={{ position: 'relative' }}>
+                  <Page
+                    key={`page_${i + 1}`}
+                    pageNumber={i + 1}
+                    renderAnnotationLayer={true}
+                    renderTextLayer={i + 1 === currDocPage}
+                    className="shadow-lg"
+                    scale={currentScale()}
+                    onLoadSuccess={(page) => {
+                      setPageWidth(page.originalWidth);
+                      setPageHeight(page.originalHeight);
+                    }}
+                  />
+                  {showBoundingBoxes && (
+                    <PDFBoundingBoxOverlay
+                      pageNumber={i + 1}
+                      structure={pdfStructure}
+                      scale={currentScale()}
+                      pageWidth={pageWidth}
+                      pageHeight={pageHeight}
+                    />
+                  )}
+                </div>
               ))}
             </div>
           ) : (
             // Single/Dual page mode
             <div className="flex justify-center gap-4">
               {currDocPages && leftPage > 0 && (
-                <Page
-                  key={`page_${leftPage}`}
-                  pageNumber={leftPage}
-                  renderAnnotationLayer={true}
-                  renderTextLayer={leftPage === currDocPage}
-                  className="shadow-lg"
-                  scale={currentScale()}
-                  onLoadSuccess={(page) => {
-                    setPageWidth(page.originalWidth);
-                    setPageHeight(page.originalHeight);
-                  }}
-                />
+                <div style={{ position: 'relative' }}>
+                  <Page
+                    key={`page_${leftPage}`}
+                    pageNumber={leftPage}
+                    renderAnnotationLayer={true}
+                    renderTextLayer={leftPage === currDocPage}
+                    className="shadow-lg"
+                    scale={currentScale()}
+                    onLoadSuccess={(page) => {
+                      setPageWidth(page.originalWidth);
+                      setPageHeight(page.originalHeight);
+                    }}
+                  />
+                  {showBoundingBoxes && (
+                    <PDFBoundingBoxOverlay
+                      pageNumber={leftPage}
+                      structure={pdfStructure}
+                      scale={currentScale()}
+                      pageWidth={pageWidth}
+                      pageHeight={pageHeight}
+                    />
+                  )}
+                </div>
               )}
               {currDocPages && rightPage && rightPage <= currDocPages && viewType === 'dual' && (
-                <Page
-                  key={`page_${rightPage}`}
-                  pageNumber={rightPage}
-                  renderAnnotationLayer={true}
-                  renderTextLayer={rightPage === currDocPage}
-                  className="shadow-lg"
-                  scale={currentScale()}
-                  onLoadSuccess={(page) => {
-                    setPageWidth(page.originalWidth);
-                    setPageHeight(page.originalHeight);
-                  }}
-                />
+                <div style={{ position: 'relative' }}>
+                  <Page
+                    key={`page_${rightPage}`}
+                    pageNumber={rightPage}
+                    renderAnnotationLayer={true}
+                    renderTextLayer={rightPage === currDocPage}
+                    className="shadow-lg"
+                    scale={currentScale()}
+                    onLoadSuccess={(page) => {
+                      setPageWidth(page.originalWidth);
+                      setPageHeight(page.originalHeight);
+                    }}
+                  />
+                  {showBoundingBoxes && (
+                    <PDFBoundingBoxOverlay
+                      pageNumber={rightPage}
+                      structure={pdfStructure}
+                      scale={currentScale()}
+                      pageWidth={pageWidth}
+                      pageHeight={pageHeight}
+                    />
+                  )}
+                </div>
               )}
             </div>
           )}

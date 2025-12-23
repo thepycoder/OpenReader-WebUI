@@ -9,6 +9,8 @@ import { usePDF } from '@/contexts/PDFContext';
 import { AudiobookExportModal } from '@/components/AudiobookExportModal';
 import { useParams } from 'next/navigation';
 import type { TTSAudiobookChapter, TTSAudiobookFormat } from '@/types/tts';
+import { getPdfFilter, savePdfFilter } from '@/lib/dexie';
+import type { PDFElementFilter } from '@/types/pdfStructure';
 
 const isDev = process.env.NEXT_PUBLIC_NODE_ENV !== 'production' || process.env.NODE_ENV == null;
 
@@ -38,6 +40,7 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
     epubHighlightEnabled,
     pdfWordHighlightEnabled,
     epubWordHighlightEnabled,
+    pdfElementFilters: globalPdfElementFilters,
   } = useConfig();
   const { createFullAudioBook: createEPUBAudioBook, regenerateChapter: regenerateEPUBChapter } = useEPUB();
   const { createFullAudioBook: createPDFAudioBook, regenerateChapter: regeneratePDFChapter } = usePDF();
@@ -50,6 +53,31 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
   });
   const [isAudiobookModalOpen, setIsAudiobookModalOpen] = useState(false);
   const selectedView = viewTypeTextMapping.find(v => v.id === viewType) || viewTypeTextMapping[0];
+  const [useGlobalFilters, setUseGlobalFilters] = useState(true);
+  const [documentFilters, setDocumentFilters] = useState<PDFElementFilter>(globalPdfElementFilters);
+  const [showBoundingBoxes, setShowBoundingBoxes] = useState(false);
+
+  // Load document-specific filter settings
+  useEffect(() => {
+    if (!epub && !html && id) {
+      getPdfFilter(id as string).then(filterRow => {
+        if (filterRow) {
+          setUseGlobalFilters(filterRow.useGlobal);
+          if (!filterRow.useGlobal) {
+            setDocumentFilters(filterRow.filter);
+          }
+          setShowBoundingBoxes(filterRow.showBoundingBoxes || false);
+        }
+      }).catch(console.error);
+    }
+  }, [id, epub, html]);
+
+  // Update document filters when global filters change (if using global)
+  useEffect(() => {
+    if (useGlobalFilters) {
+      setDocumentFilters(globalPdfElementFilters);
+    }
+  }, [useGlobalFilters, globalPdfElementFilters]);
 
   // Sync local margins with global state
   useEffect(() => {
@@ -421,6 +449,91 @@ export function DocumentSettings({ isOpen, setIsOpen, epub, html }: {
                         <p className="text-sm text-muted pl-6">
                           Apply the current app theme to the EPUB viewer background and text colors
                         </p>
+                      </div>
+                    )}
+                    {!epub && !html && (
+                      <div className="space-y-3 pt-2 border-t border-muted">
+                        <label className="block text-sm font-medium text-foreground">PDF Element Filters</label>
+                        <div className="space-y-2">
+                          <label className="flex items-center space-x-2">
+                            <input
+                              type="checkbox"
+                              checked={useGlobalFilters}
+                              onChange={(e) => {
+                                const newUseGlobal = e.target.checked;
+                                setUseGlobalFilters(newUseGlobal);
+                                if (id) {
+                                  savePdfFilter(id as string, documentFilters, newUseGlobal, showBoundingBoxes).catch(console.error);
+                                }
+                              }}
+                              className="form-checkbox h-4 w-4 text-accent rounded border-muted"
+                            />
+                            <span className="text-sm font-medium text-foreground">Use global settings</span>
+                          </label>
+                          {!useGlobalFilters && (
+                            <div className="pl-6 space-y-2">
+                              <label className="flex items-center space-x-2">
+                                <input
+                                  type="checkbox"
+                                  checked={documentFilters.enabled}
+                                  onChange={(e) => {
+                                    const newFilters = { ...documentFilters, enabled: e.target.checked };
+                                    setDocumentFilters(newFilters);
+                                    if (id) {
+                                      savePdfFilter(id as string, newFilters, false, showBoundingBoxes).catch(console.error);
+                                    }
+                                  }}
+                                  className="form-checkbox h-4 w-4 text-accent rounded border-muted"
+                                />
+                                <span className="text-sm font-medium text-foreground">Enable filtering</span>
+                              </label>
+                              {documentFilters.enabled && (
+                                <div className="pl-6 space-y-1.5">
+                                  {(['header', 'footer', 'image', 'caption', 'figure', 'table'] as const).map((type) => (
+                                    <label key={type} className="flex items-center space-x-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={documentFilters.excludedTypes.includes(type)}
+                                        onChange={(e) => {
+                                          const newExcludedTypes = e.target.checked
+                                            ? [...documentFilters.excludedTypes, type]
+                                            : documentFilters.excludedTypes.filter(t => t !== type);
+                                          const newFilters = { ...documentFilters, excludedTypes: newExcludedTypes };
+                                          setDocumentFilters(newFilters);
+                                          if (id) {
+                                            savePdfFilter(id as string, newFilters, false, showBoundingBoxes).catch(console.error);
+                                          }
+                                        }}
+                                        className="form-checkbox h-4 w-4 text-accent rounded border-muted"
+                                      />
+                                      <span className="text-sm text-foreground capitalize">{type}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <div className="space-y-2 pt-2 border-t border-muted">
+                          <label className="flex items-center space-x-2">
+                            <input
+                              type="checkbox"
+                              checked={showBoundingBoxes}
+                              onChange={(e) => {
+                                const newValue = e.target.checked;
+                                setShowBoundingBoxes(newValue);
+                                if (id) {
+                                  savePdfFilter(id as string, documentFilters, useGlobalFilters, newValue).catch(console.error);
+                                }
+                              }}
+                              className="form-checkbox h-4 w-4 text-accent rounded border-muted"
+                            />
+                            <span className="text-sm font-medium text-foreground">Show bounding boxes</span>
+                          </label>
+                          <p className="text-xs text-muted pl-6">
+                            Display PyMuPDF detected element boundaries for debugging and filter configuration
+                          </p>
+                        </div>
                       </div>
                     )}
                   </div>
