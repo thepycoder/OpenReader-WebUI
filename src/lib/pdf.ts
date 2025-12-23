@@ -330,7 +330,62 @@ export function extractTextFromBlocks(
 }
 
 /**
- * Extract text from PDF using structure data, filters, and reading order
+ * Extract text from a specific page using pre-loaded structure and filter.
+ * This avoids fetching structure/filter from Dexie on every call.
+ */
+export function extractTextFromPageWithStructure(
+  pdf: PDFDocumentProxy,
+  pageNumber: number,
+  structure: PDFStructure | null,
+  filter: PDFElementFilter | null,
+  margins = { header: 0.07, footer: 0.07, left: 0.07, right: 0.07 }
+): Promise<string> {
+  if (!structure) {
+    // Fallback to original extraction
+    return extractTextFromPDF(pdf, pageNumber, margins);
+  }
+  
+  // Find blocks for this page
+  const pageData = structure.pages.find(p => p.pageNumber === pageNumber);
+  if (!pageData) {
+    // Fallback if page not found in structure
+    return extractTextFromPDF(pdf, pageNumber, margins);
+  }
+  
+  // Filter blocks
+  let filteredBlocks = pageData.blocks;
+  
+  if (filter?.enabled) {
+    filteredBlocks = filteredBlocks.filter(block => {
+      // Exclude by type
+      if (filter.excludedTypes.includes(block.type)) {
+        return false;
+      }
+      
+      // Exclude by specific block IDs
+      if (filter.excludedBboxes?.includes(block.id)) {
+        return false;
+      }
+      
+      return true;
+    });
+  }
+  
+  // Sort by reading order
+  filteredBlocks.sort((a, b) => a.readingOrder - b.readingOrder);
+  
+  // Extract text from filtered blocks
+  const texts = filteredBlocks
+    .filter(block => block.text.trim())
+    .map(block => preprocessSentenceForAudio(block.text));
+  
+  return Promise.resolve(texts.join(' '));
+}
+
+/**
+ * Extract text from PDF using structure data, filters, and reading order.
+ * Loads structure and filter from Dexie - use extractTextFromPageWithStructure
+ * if you already have structure/filter loaded.
  */
 export async function extractTextFromPDFWithStructure(
   documentId: string,
@@ -363,41 +418,7 @@ export async function extractTextFromPDFWithStructure(
       ? globalFilter
       : documentFilterRow?.filter || globalFilter;
     
-    // Find blocks for this page
-    const pageData = structure.pages.find(p => p.pageNumber === pageNumber);
-    if (!pageData) {
-      // Fallback if page not found in structure
-      return extractTextFromPDF(pdf, pageNumber, margins);
-    }
-    
-    // Filter blocks
-    let filteredBlocks = pageData.blocks;
-    
-    if (activeFilter.enabled) {
-      filteredBlocks = filteredBlocks.filter(block => {
-        // Exclude by type
-        if (activeFilter.excludedTypes.includes(block.type)) {
-          return false;
-        }
-        
-        // Exclude by specific block IDs
-        if (activeFilter.excludedBboxes?.includes(block.id)) {
-          return false;
-        }
-        
-        return true;
-      });
-    }
-    
-    // Sort by reading order
-    filteredBlocks.sort((a, b) => a.readingOrder - b.readingOrder);
-    
-    // Extract text from filtered blocks
-    const texts = filteredBlocks
-      .filter(block => block.text.trim())
-      .map(block => preprocessSentenceForAudio(block.text));
-    
-    return texts.join(' ');
+    return extractTextFromPageWithStructure(pdf, pageNumber, structure, activeFilter, margins);
   } catch (error) {
     console.error('Error extracting text with structure:', error);
     // Fallback to original extraction

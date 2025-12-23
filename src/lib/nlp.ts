@@ -34,7 +34,14 @@ export const preprocessSentenceForAudio = (text: string): string => {
  * @returns {string[]} Array of sentence blocks
  */
 export const splitIntoSentences = (text: string): string[] => {
-  const paragraphs = text.split(/\n+/);
+  // Normalize line breaks: 
+  // - Double+ newlines = paragraph break (keep as separator)
+  // - Single newlines = soft line wrap (replace with space)
+  const normalizedText = text
+    .replace(/\n{2,}/g, '\n\n')  // Normalize multiple newlines to exactly 2
+    .replace(/(?<!\n)\n(?!\n)/g, ' '); // Replace single newlines with space
+  
+  const paragraphs = normalizedText.split(/\n\n+/);
   const blocks: string[] = [];
 
   for (const paragraph of paragraphs) {
@@ -113,6 +120,20 @@ export const processBlockToChunks = (
     return [];
   }
 
+  // Log block details
+  console.log(`[Block ${blockIndex}] Processing block:`, {
+    blockId: block.id,
+    type: block.type,
+    page: pageNumber,
+    textLength: text.length,
+    cleanedLength: cleanedText.length,
+    bbox: block.bbox,
+    fontSize: block.fontSize,
+    fontName: block.fontName,
+    fullText: text, // Full original text
+    cleanedText: cleanedText, // Full cleaned text
+  });
+
   // Short blocks become a single chunk
   if (cleanedText.length <= MAX_BLOCK_LENGTH) {
     return [{
@@ -150,124 +171,9 @@ export const processBlockToChunks = (
   }));
 };
 
-// Pattern to detect sentence endings for aggregation logic
-const SENTENCE_ENDING = /[.?!…]["'"')\]]*\s*$/;
-
-// Minimum threshold before we consider splitting at sentence boundaries during aggregation
-const AGGREGATION_MIN_LENGTH = 200;
-
-/**
- * Aggregated block result for TTS processing
- */
-interface AggregatedBlock {
-  text: string;
-  representativeBlockId: string;
-  representativeBlockIndex: number;
-  pageNumber: number;
-}
-
-/**
- * Aggregates consecutive granular blocks into logical text units for better TTS processing.
- * This handles PDFs where blocks are very granular (e.g., one line per block).
- * 
- * Aggregation rules:
- * 1. Combine consecutive blocks on the same page
- * 2. Stop aggregating when:
- *    - Page changes
- *    - Block type changes (e.g., text -> heading)  
- *    - A sentence ending is detected AND combined text exceeds AGGREGATION_MIN_LENGTH
- * 
- * @param {PDFBlock[]} blocks - Array of PDF blocks to aggregate
- * @param {number[]} blockIndices - Global reading order indices for each block
- * @param {number[]} pageNumbers - Page numbers for each block
- * @returns {AggregatedBlock[]} Array of aggregated blocks
- */
-export const aggregateBlocksForTTS = (
-  blocks: PDFBlock[],
-  blockIndices: number[],
-  pageNumbers: number[]
-): AggregatedBlock[] => {
-  if (blocks.length === 0) return [];
-  
-  const aggregated: AggregatedBlock[] = [];
-  
-  let currentText = '';
-  let currentBlockId = blocks[0].id;
-  let currentBlockIndex = blockIndices[0];
-  let currentPage = pageNumbers[0];
-  let currentType = blocks[0].type;
-  
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
-    const blockIndex = blockIndices[i];
-    const pageNumber = pageNumbers[i];
-    const blockText = block.text?.trim() || '';
-    
-    if (!blockText) continue;
-    
-    // Check if we should start a new aggregated block
-    const pageChanged = pageNumber !== currentPage;
-    const typeChanged = block.type !== currentType && block.type !== 'text';
-    const isHeading = block.type === 'heading';
-    const atSentenceEnd = SENTENCE_ENDING.test(currentText);
-    const exceedsMinLength = currentText.length >= AGGREGATION_MIN_LENGTH;
-    
-    const shouldStartNewGroup = 
-      pageChanged ||
-      typeChanged ||
-      isHeading ||
-      (atSentenceEnd && exceedsMinLength);
-    
-    if (shouldStartNewGroup && currentText) {
-      // Flush current group
-      aggregated.push({
-        text: preprocessSentenceForAudio(currentText),
-        representativeBlockId: currentBlockId,
-        representativeBlockIndex: currentBlockIndex,
-        pageNumber: currentPage,
-      });
-      
-      // Start new group
-      currentText = blockText;
-      currentBlockId = block.id;
-      currentBlockIndex = blockIndex;
-      currentPage = pageNumber;
-      currentType = block.type;
-    } else {
-      // Continue aggregating
-      if (currentText) {
-        // Add space if needed between blocks
-        if (!currentText.endsWith(' ') && !blockText.startsWith(' ')) {
-          currentText += ' ';
-        }
-        currentText += blockText;
-      } else {
-        // First block in group
-        currentText = blockText;
-        currentBlockId = block.id;
-        currentBlockIndex = blockIndex;
-        currentPage = pageNumber;
-        currentType = block.type;
-      }
-    }
-  }
-  
-  // Don't forget the last group
-  if (currentText) {
-    aggregated.push({
-      text: preprocessSentenceForAudio(currentText),
-      representativeBlockId: currentBlockId,
-      representativeBlockIndex: currentBlockIndex,
-      pageNumber: currentPage,
-    });
-  }
-  
-  return aggregated;
-};
-
 /**
  * Processes multiple PDF blocks into a flattened array of TTS chunks.
- * First aggregates consecutive granular blocks, then processes each aggregated unit.
+ * Each block is processed individually - no aggregation between blocks.
  * 
  * @param {PDFBlock[]} blocks - Array of PDF blocks to process
  * @param {number[]} blockIndices - Global reading order indices for each block
@@ -279,56 +185,16 @@ export const processBlocksToChunks = (
   blockIndices: number[],
   pageNumbers: number[]
 ): TTSBlockChunk[] => {
-  // First aggregate consecutive granular blocks
-  const aggregatedBlocks = aggregateBlocksForTTS(blocks, blockIndices, pageNumbers);
-  
   const allChunks: TTSBlockChunk[] = [];
   
-  for (const aggregated of aggregatedBlocks) {
-    const { text, representativeBlockId, representativeBlockIndex, pageNumber } = aggregated;
+  // Process each block individually - 1:1 mapping (block may split into chunks if long)
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const blockIndex = blockIndices[i];
+    const pageNumber = pageNumbers[i];
     
-    if (!text) continue;
-    
-    // Short aggregated blocks become a single chunk
-    if (text.length <= MAX_BLOCK_LENGTH) {
-      allChunks.push({
-        blockId: representativeBlockId,
-        blockIndex: representativeBlockIndex,
-        chunkIndex: 0,
-        totalChunksInBlock: 1,
-        text,
-        pageNumber,
-      });
-      continue;
-    }
-    
-    // Longer aggregated blocks get split into sentences
-    const sentences = splitIntoSentences(text);
-    
-    if (sentences.length === 0) {
-      // Fallback: return whole text as one chunk
-      allChunks.push({
-        blockId: representativeBlockId,
-        blockIndex: representativeBlockIndex,
-        chunkIndex: 0,
-        totalChunksInBlock: 1,
-        text,
-        pageNumber,
-      });
-      continue;
-    }
-    
-    // Create chunks for each sentence
-    for (let idx = 0; idx < sentences.length; idx++) {
-      allChunks.push({
-        blockId: representativeBlockId,
-        blockIndex: representativeBlockIndex,
-        chunkIndex: idx,
-        totalChunksInBlock: sentences.length,
-        text: sentences[idx],
-        pageNumber,
-      });
-    }
+    const chunks = processBlockToChunks(block, blockIndex, pageNumber);
+    allChunks.push(...chunks);
   }
   
   return allChunks;

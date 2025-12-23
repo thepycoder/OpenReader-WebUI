@@ -225,9 +225,7 @@ export async function initDB(): Promise<void> {
 
   dbOpenPromise = (async () => {
     try {
-      console.log('Opening Dexie database...');
       await db.open();
-      console.log('Dexie database opened successfully');
     } catch (error) {
       console.error('Dexie initialization error:', error);
       dbOpenPromise = null;
@@ -247,28 +245,24 @@ async function withDB<T>(operation: () => Promise<T>): Promise<T> {
 
 export async function addPdfDocument(document: PDFDocument): Promise<void> {
   await withDB(async () => {
-    console.log('Adding PDF document via Dexie:', document.name);
     await db[PDF_TABLE].put(document);
   });
 }
 
 export async function getPdfDocument(id: string): Promise<PDFDocument | undefined> {
   return withDB(async () => {
-    console.log('Fetching PDF document via Dexie:', id);
     return db[PDF_TABLE].get(id);
   });
 }
 
 export async function getAllPdfDocuments(): Promise<PDFDocument[]> {
   return withDB(async () => {
-    console.log('Fetching all PDF documents via Dexie');
     return db[PDF_TABLE].toArray();
   });
 }
 
 export async function removePdfDocument(id: string): Promise<void> {
   await withDB(async () => {
-    console.log('Removing PDF document via Dexie:', id);
     await db.transaction('readwrite', db[PDF_TABLE], db[LAST_LOCATION_TABLE], db[PDF_STRUCTURE_TABLE], db[PDF_FILTERS_TABLE], async () => {
       await db[PDF_TABLE].delete(id);
       await db[LAST_LOCATION_TABLE].delete(id);
@@ -280,7 +274,6 @@ export async function removePdfDocument(id: string): Promise<void> {
 
 export async function clearPdfDocuments(): Promise<void> {
   await withDB(async () => {
-    console.log('Clearing all PDF documents via Dexie');
     await db[PDF_TABLE].clear();
   });
 }
@@ -292,34 +285,24 @@ export async function addEpubDocument(document: EPUBDocument): Promise<void> {
     if (document.data.byteLength === 0) {
       throw new Error('Cannot store empty ArrayBuffer');
     }
-
-    console.log('Adding EPUB document via Dexie:', {
-      name: document.name,
-      size: document.size,
-      actualSize: document.data.byteLength,
-    });
-
     await db[EPUB_TABLE].put(document);
   });
 }
 
 export async function getEpubDocument(id: string): Promise<EPUBDocument | undefined> {
   return withDB(async () => {
-    console.log('Fetching EPUB document via Dexie:', id);
     return db[EPUB_TABLE].get(id);
   });
 }
 
 export async function getAllEpubDocuments(): Promise<EPUBDocument[]> {
   return withDB(async () => {
-    console.log('Fetching all EPUB documents via Dexie');
     return db[EPUB_TABLE].toArray();
   });
 }
 
 export async function removeEpubDocument(id: string): Promise<void> {
   await withDB(async () => {
-    console.log('Removing EPUB document via Dexie:', id);
     await db.transaction('readwrite', db[EPUB_TABLE], db[LAST_LOCATION_TABLE], async () => {
       await db[EPUB_TABLE].delete(id);
       await db[LAST_LOCATION_TABLE].delete(id);
@@ -329,7 +312,6 @@ export async function removeEpubDocument(id: string): Promise<void> {
 
 export async function clearEpubDocuments(): Promise<void> {
   await withDB(async () => {
-    console.log('Clearing all EPUB documents via Dexie');
     await db[EPUB_TABLE].clear();
   });
 }
@@ -338,35 +320,30 @@ export async function clearEpubDocuments(): Promise<void> {
 
 export async function addHtmlDocument(document: HTMLDocument): Promise<void> {
   await withDB(async () => {
-    console.log('Adding HTML document via Dexie:', document.name);
     await db[HTML_TABLE].put(document);
   });
 }
 
 export async function getHtmlDocument(id: string): Promise<HTMLDocument | undefined> {
   return withDB(async () => {
-    console.log('Fetching HTML document via Dexie:', id);
     return db[HTML_TABLE].get(id);
   });
 }
 
 export async function getAllHtmlDocuments(): Promise<HTMLDocument[]> {
   return withDB(async () => {
-    console.log('Fetching all HTML documents via Dexie');
     return db[HTML_TABLE].toArray();
   });
 }
 
 export async function removeHtmlDocument(id: string): Promise<void> {
   await withDB(async () => {
-    console.log('Removing HTML document via Dexie:', id);
     await db[HTML_TABLE].delete(id);
   });
 }
 
 export async function clearHtmlDocuments(): Promise<void> {
   await withDB(async () => {
-    console.log('Clearing all HTML documents via Dexie');
     await db[HTML_TABLE].clear();
   });
 }
@@ -589,7 +566,6 @@ export async function loadDocumentsFromServer(
 
 export async function savePdfStructure(documentId: string, structure: PDFStructureRow['structure']): Promise<void> {
   await withDB(async () => {
-    console.log('Saving PDF structure via Dexie:', documentId);
     await db[PDF_STRUCTURE_TABLE].put({
       documentId,
       structure,
@@ -600,14 +576,12 @@ export async function savePdfStructure(documentId: string, structure: PDFStructu
 
 export async function getPdfStructure(documentId: string): Promise<PDFStructureRow | undefined> {
   return withDB(async () => {
-    console.log('Fetching PDF structure via Dexie:', documentId);
     return db[PDF_STRUCTURE_TABLE].get(documentId);
   });
 }
 
 export async function removePdfStructure(documentId: string): Promise<void> {
   await withDB(async () => {
-    console.log('Removing PDF structure via Dexie:', documentId);
     await db[PDF_STRUCTURE_TABLE].delete(documentId);
   });
 }
@@ -616,7 +590,6 @@ export async function removePdfStructure(documentId: string): Promise<void> {
 
 export async function savePdfFilter(documentId: string, filter: PDFFilterRow['filter'], useGlobal: boolean, showBoundingBoxes?: boolean): Promise<void> {
   await withDB(async () => {
-    console.log('Saving PDF filter via Dexie:', documentId);
     const existing = await db[PDF_FILTERS_TABLE].get(documentId);
     await db[PDF_FILTERS_TABLE].put({
       documentId,
@@ -629,14 +602,12 @@ export async function savePdfFilter(documentId: string, filter: PDFFilterRow['fi
 
 export async function getPdfFilter(documentId: string): Promise<PDFFilterRow | undefined> {
   return withDB(async () => {
-    console.log('Fetching PDF filter via Dexie:', documentId);
     return db[PDF_FILTERS_TABLE].get(documentId);
   });
 }
 
 export async function removePdfFilter(documentId: string): Promise<void> {
   await withDB(async () => {
-    console.log('Removing PDF filter via Dexie:', documentId);
     await db[PDF_FILTERS_TABLE].delete(documentId);
   });
 }
